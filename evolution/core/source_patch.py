@@ -134,3 +134,19 @@ def replace_literals(source: str, replacements: dict[StringLiteral, str]) -> str
     if missing:
         raise ValueError(f"Rewrite verification failed for: {missing}")
     return new_source
+
+
+def literal_changes(repo: Path, found: dict[str, StringLiteral], evolved: dict[str, str]) -> dict[str, tuple[str, str]]:
+    """Group changed literals by file and rewrite each file once.
+
+    Returns repo-relative path -> (old_source, new_source) for files that change.
+    """
+    by_file: dict[Path, dict[StringLiteral, str]] = {}
+    for key, lit in found.items():
+        if key in evolved and evolved[key] != lit.value:
+            by_file.setdefault(lit.file, {})[lit] = evolved[key]
+    changes = {}
+    for path, repl in by_file.items():
+        old = Path(path).read_text()
+        changes[str(Path(path).relative_to(repo))] = (old, replace_literals(old, repl))
+    return changes
