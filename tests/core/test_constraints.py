@@ -96,3 +96,14 @@ class TestValidateAll:
         results = validator.validate_all("", "skill")
         failed = [r for r in results if not r.passed]
         assert len(failed) > 0
+
+
+def test_reassembled_skill_passes_structure_check():
+    """Regression: evolve_skill must validate the reassembled file, not the bare body."""
+    from evolution.core.config import EvolutionConfig
+    from evolution.core.constraints import ConstraintValidator
+    from evolution.skills.skill_module import reassemble_skill
+    full = reassemble_skill("name: x\ndescription: y", "# Body\n1. step")
+    v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
+    results = {r.constraint_name: r.passed for r in v.validate_all(full, "skill", baseline_text=full)}
+    assert results["skill_structure"] is True

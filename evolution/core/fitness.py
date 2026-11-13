@@ -136,6 +136,30 @@ def skill_fitness_metric(example: dspy.Example, prediction: dspy.Prediction, tra
     return min(1.0, max(0.0, score))
 
 
+def skill_gepa_metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -> dspy.Prediction:
+    """GEPA-compatible metric: same score as skill_fitness_metric plus feedback.
+
+    GEPA's reflection LM reads ``feedback`` to decide how to rewrite the skill,
+    so we tell it which expected-behavior terms the output missed.
+    """
+    score = skill_fitness_metric(gold, pred, trace)
+    agent_output = (getattr(pred, "output", "") or "").strip()
+    expected = getattr(gold, "expected_behavior", "") or ""
+    if not agent_output:
+        return dspy.Prediction(score=0.0, feedback="The response was empty. The skill must lead to a concrete answer.")
+    out_words = set(agent_output.lower().split())
+    missing = [w for w in dict.fromkeys(expected.lower().split()) if len(w) > 3 and w not in out_words]
+    if missing:
+        feedback = (
+            f"Score {score:.2f}. Expected behavior: {expected!r}. "
+            f"The response did not cover: {', '.join(missing[:15])}. "
+            "Revise the skill so an agent following it addresses these points."
+        )
+    else:
+        feedback = f"Score {score:.2f}. The response covered the expected behavior: {expected!r}."
+    return dspy.Prediction(score=score, feedback=feedback)
+
+
 def _parse_score(value) -> float:
     """Parse a score value, handling various LLM output formats."""
     if isinstance(value, (int, float)):

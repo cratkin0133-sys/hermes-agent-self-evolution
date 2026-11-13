@@ -90,3 +90,30 @@ class TestReassembleSkill:
 
         assert "EVOLVED" in result
         assert "New and improved" in result
+
+
+class TestSkillModuleOptimizable:
+    """The skill body must live where DSPy optimizers can mutate it."""
+
+    def test_skill_text_is_predictor_instructions(self):
+        from evolution.skills.skill_module import SkillModule
+        m = SkillModule("# My Skill\n1. do it")
+        preds = list(m.named_predictors())
+        assert len(preds) == 1
+        assert preds[0][1].signature.instructions == "# My Skill\n1. do it"
+        assert m.skill_text == "# My Skill\n1. do it"
+
+    def test_skill_text_reflects_optimizer_mutation(self):
+        from evolution.skills.skill_module import SkillModule
+        m = SkillModule("original")
+        _, pred = next(iter(m.named_predictors()))
+        # Simulate what GEPA/MIPROv2 do: replace the predictor's instructions
+        pred.signature = pred.signature.with_instructions("evolved")
+        assert m.skill_text == "evolved"
+
+    def test_forward_does_not_pass_skill_as_input(self):
+        from evolution.skills.skill_module import SkillModule
+        m = SkillModule("x")
+        _, pred = next(iter(m.named_predictors()))
+        assert "skill_instructions" not in pred.signature.input_fields
+        assert "task_input" in pred.signature.input_fields
