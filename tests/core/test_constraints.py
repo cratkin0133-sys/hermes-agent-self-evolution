@@ -114,3 +114,30 @@ def test_reassembled_skill_passes_structure_check():
     v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
     results = {r.constraint_name: r.passed for r in v.validate_all(full, "skill", baseline_text=full)}
     assert results["skill_structure"] is True
+
+
+def test_shrink_guard_rejects_gutted_artifact():
+    from evolution.core.config import EvolutionConfig
+    from evolution.core.constraints import ConstraintValidator
+    v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
+    res = {r.constraint_name: r.passed for r in v.validate_all("tiny", "skill", baseline_text="x" * 100)}
+    assert res["shrink_limit"] is False
+
+
+def test_tool_description_already_over_cap_may_keep_its_size():
+    from evolution.core.config import EvolutionConfig
+    from evolution.core.constraints import ConstraintValidator
+    v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
+    base = "d" * 700
+    res = {r.constraint_name: r.passed for r in v.validate_all("e" * 690, "tool_description", baseline_text=base)}
+    assert res["size_limit"] and res["growth_limit"] and res["shrink_limit"]
+
+
+def test_short_tool_description_may_grow_up_to_cap_but_not_beyond_relative_limit_when_over_cap():
+    from evolution.core.config import EvolutionConfig
+    from evolution.core.constraints import ConstraintValidator
+    v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
+    grow = {r.constraint_name: r.passed for r in v.validate_all("x" * 85, "tool_description", baseline_text="x" * 40)}
+    assert grow["growth_limit"] and grow["size_limit"]
+    bloat = {r.constraint_name: r.passed for r in v.validate_all("x" * 900, "tool_description", baseline_text="x" * 700)}
+    assert not bloat["growth_limit"]

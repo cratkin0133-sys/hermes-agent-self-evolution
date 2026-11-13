@@ -37,11 +37,12 @@ class ConstraintValidator:
         results = []
 
         # 1. Size limits
-        results.append(self._check_size(artifact_text, artifact_type))
+        results.append(self._check_size(artifact_text, artifact_type, baseline_text))
 
-        # 2. Growth limit (if baseline provided)
+        # 2. Growth and shrink limits (if baseline provided)
         if baseline_text:
             results.append(self._check_growth(artifact_text, baseline_text, artifact_type))
+            results.append(self._check_shrink(artifact_text, baseline_text))
 
         # 3. Non-empty. For skills, judge the markdown body: a reassembled
         # file always starts with YAML frontmatter.
@@ -95,7 +96,7 @@ class ConstraintValidator:
                 message=f"Failed to run tests: {e}",
             )
 
-    def _check_size(self, text: str, artifact_type: str) -> ConstraintResult:
+    def _check_size(self, text: str, artifact_type: str, baseline_text: Optional[str] = None) -> ConstraintResult:
         size = len(text)
         if artifact_type == "skill":
             limit = self.config.max_skill_size
@@ -105,6 +106,11 @@ class ConstraintValidator:
             limit = self.config.max_param_desc_size
         else:
             limit = self.config.max_skill_size  # Default
+
+        # Descriptions that already exceed the cap upstream may keep (not grow
+        # past) their size; the growth check bounds them further.
+        if baseline_text and artifact_type in ("tool_description", "param_description"):
+            limit = max(limit, len(baseline_text))
 
         if size <= limit:
             return ConstraintResult(
@@ -122,6 +128,16 @@ class ConstraintValidator:
     def _check_growth(self, text: str, baseline: str, artifact_type: str) -> ConstraintResult:
         growth = (len(text) - len(baseline)) / max(1, len(baseline))
         max_growth = self.config.max_prompt_growth
+
+        # Short descriptions are bounded by their absolute cap (PLAN: <=500 / <=200
+        # chars), not by relative growth — a 40-char description may need to double.
+        caps = {"tool_description": self.config.max_tool_desc_size, "param_description": self.config.max_param_desc_size}
+        if artifact_type in caps and len(text) <= caps[artifact_type]:
+            return ConstraintResult(
+                passed=True,
+                constraint_name="growth_limit",
+                message=f"Growth {growth:+.1%} within absolute cap ({len(text)}/{caps[artifact_type]} chars)",
+            )
 
         if growth <= max_growth:
             return ConstraintResult(
@@ -147,6 +163,22 @@ class ConstraintValidator:
         if len(parts) < 3:
             return text
         return parts[2]
+
+    def _check_shrink(self, text: str, baseline: str) -> ConstraintResult:
+        """Guard against an optimizer gutting the artifact to game the metric."""
+        ratio = len(text) / max(1, len(baseline))
+        floor = self.config.min_size_ratio
+        if ratio >= floor:
+            return ConstraintResult(
+                passed=True,
+                constraint_name="shrink_limit",
+                message=f"Size retained: {ratio:.0%} of baseline (min {floor:.0%})",
+            )
+        return ConstraintResult(
+            passed=False,
+            constraint_name="shrink_limit",
+            message=f"Shrank to {ratio:.0%} of baseline (min {floor:.0%}) — likely lost content",
+        )
 
     def _check_non_empty(self, text: str) -> ConstraintResult:
         if text.strip():
