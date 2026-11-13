@@ -17,6 +17,7 @@ from typing import Optional
 
 import click
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
@@ -24,7 +25,7 @@ from evolution.core.constraints import ConstraintValidator
 from evolution.core.lm import make_lm
 from evolution.core.multi_component import evaluate_candidate, mean, optimize_components, split
 from evolution.core.pr_builder import create_branch, write_review_bundle
-from evolution.core.source_patch import replace_literals
+from evolution.core.source_patch import literal_changes
 from evolution.tools.tool_descriptions import (
     ToolTask, discover_tool_descriptions, generate_tasks, make_selection_run, per_tool_accuracy,
 )
@@ -51,7 +52,7 @@ def evolve_tool_descriptions(
 
     found, skipped = discover_tool_descriptions(repo, tools)
     for name, why in sorted(skipped.items()):
-        console.print(f"  [yellow]skip[/yellow] {name}: {why}")
+        console.print(f"  [yellow]skip[/yellow] {escape(name)}: {why}")
     if not found:
         console.print("[red]✗ No evolvable tool descriptions found[/red]")
         sys.exit(1)
@@ -121,13 +122,7 @@ def evolve_tool_descriptions(
         "optimizer_model": optimizer_model, "eval_model": eval_model,
     }
 
-    changes: dict[str, tuple[str, str]] = {}
-    by_file: dict[Path, dict] = {}
-    for n in changed:
-        by_file.setdefault(found[n].file, {})[found[n]] = evolved[n]
-    for path, repl in by_file.items():
-        old = path.read_text()
-        changes[str(path.relative_to(repo))] = (old, replace_literals(old, repl))
+    changes = literal_changes(repo, found, evolved)
 
     write_review_bundle(
         out_dir, "Evolve tool descriptions",
