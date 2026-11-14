@@ -109,6 +109,16 @@ class TestSemanticPreservation:
         assert result.passed
         assert "bigram" in result.message
 
+    def test_stripped_cjk_fails_despite_unchanged_english(self, validator):
+        baseline = (
+            "コードレビューではセキュリティ脆弱性とテスト網羅性を必ず確認すること。\n\n"
+            "Always inspect security vulnerabilities and test coverage before approving."
+        )
+        gutted = "Always inspect security vulnerabilities and test coverage before approving."
+        result = validator._check_semantic_preservation(gutted, baseline)
+        assert not result.passed
+        assert "bigram" in result.message
+
     def test_mixed_baseline_rejects_english_drift(self, validator):
         baseline = (
             "コードレビュー手順\n\n"

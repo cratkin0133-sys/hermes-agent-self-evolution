@@ -236,30 +236,23 @@ class ConstraintValidator:
             ),
         )
 
-    @staticmethod
-    def _cjk_heavy(text: str) -> bool:
-        """True when the text is mostly ideographic / syllabic (no word spaces)."""
-        cjk = sum(
-            1
-            for c in text
-            if ("\u4e00" <= c <= "\u9fff")
-            or ("\u3040" <= c <= "\u30ff")
-            or ("\uac00" <= c <= "\ud7a3")
-        )
-        letters = sum(1 for c in text if c.isalpha())
-        return letters >= 8 and cjk >= letters * 0.4
+    @classmethod
+    def _has_cjk_content(cls, text: str, min_chars: int = 8) -> bool:
+        """True when the text has enough CJK to require bigram preservation."""
+        return sum(1 for c in text if cls._is_cjk_char(c)) >= min_chars
 
     @staticmethod
-    def _semantic_bigrams(text: str) -> set[str]:
-        """Adjacent character pairs for scripts without clear word boundaries."""
-        chars = [
-            c
-            for c in text.lower()
-            if c.isalnum()
-            or ("\u4e00" <= c <= "\u9fff")
-            or ("\u3040" <= c <= "\u30ff")
-            or ("\uac00" <= c <= "\ud7a3")
-        ]
+    def _is_cjk_char(ch: str) -> bool:
+        return (
+            ("\u4e00" <= ch <= "\u9fff")
+            or ("\u3040" <= ch <= "\u30ff")
+            or ("\uac00" <= ch <= "\ud7a3")
+        )
+
+    @classmethod
+    def _semantic_bigrams(cls, text: str) -> set[str]:
+        """Adjacent CJK pairs only — Latin must not inflate bigram recall."""
+        chars = [c for c in text.lower() if cls._is_cjk_char(c)]
         if len(chars) < 2:
             return set()
         return {chars[i] + chars[i + 1] for i in range(len(chars) - 1)}
@@ -275,7 +268,7 @@ class ConstraintValidator:
             scores.append(len(baseline_words & evolved_words) / len(baseline_words))
             parts.append("term")
 
-        if self._cjk_heavy(baseline):
+        if self._has_cjk_content(baseline):
             baseline_bigrams = self._semantic_bigrams(baseline)
             evolved_bigrams = self._semantic_bigrams(text)
             if baseline_bigrams:
