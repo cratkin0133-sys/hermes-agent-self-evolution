@@ -280,7 +280,7 @@ def evolve(
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
         "phase": "skill",
-        "accepted": all_pass and improvement > 0,
+        "accepted": all_pass and improvement > 0 and evolved_full != skill["raw"],
     }
     accepted = metrics["accepted"]
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
