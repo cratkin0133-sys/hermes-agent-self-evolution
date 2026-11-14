@@ -3,7 +3,7 @@
     python -m evolution.monitor.loop collect          # mine session history → usage/correction signals
     python -m evolution.monitor.loop triage           # rank what to optimize next
     python -m evolution.monitor.loop run              # collect → triage → evolve top target(s) → record
-    python -m evolution.monitor.loop bench --cmd ...  # run a benchmark command and record pass/fail
+    python -m evolution.monitor.loop bench --cmd ...  # run a benchmark, record score; fail on regression vs last accepted run
     python -m evolution.monitor.loop history          # recent runs
     python -m evolution.monitor.loop cron             # print a crontab line for weekly unattended runs
 
@@ -21,6 +21,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from evolution.core.benchmark_gate import REGRESSION_EPSILON
 from evolution.core.benchmark_score import parse_score
 from evolution.core.config import resolve_hermes_agent_path
 from evolution.monitor.signals import compute_signals, load_messages, skill_names
@@ -149,7 +150,7 @@ def run_loop(repo, store, max_targets=1, phases=("skill", "tool"), min_uses=3, c
 @click.option("--cmd", "command", required=True, help="Benchmark command run in the hermes-agent repo")
 @click.option("--name", default="benchmark")
 @click.option("--timeout", default=7200)
-@click.option("--max-regression", default=0.02, type=float, help="Fail if the score drops more than this vs the previous run")
+@click.option("--max-regression", default=0.02, type=float, help="Fail if the score drops more than this vs the last accepted scored run")
 @click.pass_context
 def bench_cmd(ctx, command, name, timeout, max_regression):
     """Run a benchmark/test command, record pass/fail and score, and flag score regressions."""
@@ -163,10 +164,13 @@ def bench_cmd(ctx, command, name, timeout, max_regression):
         ok, tail, score = p.returncode == 0, output[-2000:], parse_score(output)
     except subprocess.TimeoutExpired:
         ok, tail = False, f"timeout after {timeout}s"
-    store.record_run("benchmark", name, {"accepted": ok, "command": command, "output_tail": tail, "evolved_score": score})
+    regressed = ok and score is not None and prev is not None and score < prev - max_regression - REGRESSION_EPSILON
+    # A regressed run is recorded as not accepted, so it never becomes the next baseline.
+    store.record_run("benchmark", name, {"accepted": ok and not regressed, "command": command,
+                                         "output_tail": tail, "evolved_score": score})
     fmt = lambda v: "n/a" if v is None else f"{v:g}"
     console.print(f"{name}: {'PASS' if ok else 'FAIL'} score={fmt(score)} (prev {fmt(prev)})")
-    if ok and score is not None and prev is not None and score < prev - max_regression:
+    if regressed:
         console.print(f"REGRESSION {prev:g} \u2192 {score:g}")
         ok = False
     sys.exit(0 if ok else 1)

@@ -78,9 +78,10 @@ class MetricsStore:
         ).fetchone()
 
     def previous_scored_run(self, phase: str, target: str) -> Optional[sqlite3.Row]:
-        """Latest run for the target that recorded a numeric score."""
+        """Latest accepted run for the target that recorded a numeric score (the baseline)."""
         return self.db.execute(
-            "SELECT * FROM runs WHERE phase=? AND target=? AND evolved IS NOT NULL ORDER BY ts DESC, id DESC LIMIT 1",
+            "SELECT * FROM runs WHERE phase=? AND target=? AND accepted=1 AND evolved IS NOT NULL "
+            "ORDER BY ts DESC, id DESC LIMIT 1",
             (phase, target),
         ).fetchone()
 
