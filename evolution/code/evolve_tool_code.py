@@ -59,10 +59,22 @@ class Organism:
 
 
 def find_tool_file(repo: Path, tool: str) -> Optional[Path]:
+    """File whose ``registry.register(name=<tool>, ...)`` call registers the tool (AST, any formatting)."""
+    import ast
     for path in sorted((repo / "tools").rglob("*.py")):
         text = path.read_text(errors="ignore")
-        if f'registry.register(name="{tool}"' in text or f"registry.register(name='{tool}'" in text:
-            return path
+        if tool not in text or "registry.register" not in text:
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "register"
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "registry"):
+                for kw in node.keywords:
+                    if kw.arg == "name" and isinstance(kw.value, ast.Constant) and kw.value.value == tool:
+                        return path
     return None
 
 

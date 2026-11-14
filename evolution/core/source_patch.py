@@ -97,20 +97,35 @@ def find_schema_descriptions(path: Path) -> tuple[dict[str, StringLiteral], dict
     return found, skipped
 
 
+def _chunks(value: str, width: int = 88) -> list[str]:
+    """Split text into source-friendly pieces: at newlines, then at spaces near ``width``."""
+    out: list[str] = []
+    for line in value.splitlines(keepends=True) or [""]:
+        while len(line) > width:
+            cut = line.rfind(" ", 0, width)
+            cut = width if cut <= 0 else cut + 1
+            out.append(line[:cut])
+            line = line[cut:]
+        if line:
+            out.append(line)
+    return out or [""]
+
+
 def format_literal(value: str, multiline: bool, indent: str = "    ") -> str:
-    """Render a Python string literal. Multi-line sources become a parenthesized
-    implicit concatenation, one chunk per line, so diffs stay readable."""
+    """Render a Python string literal; multi-line form is an implicit concatenation."""
     if not multiline:
         return json.dumps(value, ensure_ascii=False)
-    chunks = value.splitlines(keepends=True) or [""]
-    body = "\n".join(f"{indent}{json.dumps(c, ensure_ascii=False)}" for c in chunks)
-    return f"(\n{body}\n)"
+    return f"\n{indent}".join(json.dumps(c, ensure_ascii=False) for c in _chunks(value))
 
 
 def replace_literals(source: str, replacements: dict[StringLiteral, str]) -> str:
     """Replace each literal's exact source span with a new literal of ``value``.
 
-    Verifies by re-parsing that every replaced constant now holds the new value.
+    Multi-line literals are continued in place (they already sit inside
+    brackets, so no extra parentheses), comments inside the span are kept, and
+    text is wrapped near 88 columns. One-line literals stay one line (matching
+    the file's style); only a value that gains newlines is parenthesized. Verifies by re-parsing that every replaced
+    constant now holds the new value.
     """
     data = source.encode()
     starts = [0]
@@ -124,8 +139,20 @@ def replace_literals(source: str, replacements: dict[StringLiteral, str]) -> str
     for lit, new_value in spans:
         a, b = off(lit.lineno, lit.col), off(lit.end_lineno, lit.end_col)
         line_start = data.rfind(b"\n", 0, a) + 1
-        indent = " " * (len(data[line_start:a].decode()) - len(data[line_start:a].decode().lstrip()) + 4)
-        data = data[:a] + format_literal(new_value, lit.multiline_source, indent).encode() + data[b:]
+        prefix = data[line_start:a].decode()
+        line_indent = prefix[: len(prefix) - len(prefix.lstrip())]
+        if not lit.multiline_source and "\n" not in new_value:  # match the file: one-liners stay one line
+            data = data[:a] + format_literal(new_value, False).encode() + data[b:]
+            continue
+        comments = [l.strip() for l in data[a:b].decode().splitlines() if l.strip().startswith("#")]
+        if lit.multiline_source:
+            # Already inside brackets (that is how it spans lines): continue in place.
+            ind = " " * len(prefix)
+            rendered = f"\n{ind}".join(comments + [format_literal(new_value, True, ind)])
+        else:
+            ind = line_indent + "    "
+            rendered = f"(\n{ind}{format_literal(new_value, True, ind)}\n{line_indent})"
+        data = data[:a] + rendered.encode() + data[b:]
     new_source = data.decode()
 
     tree = ast.parse(new_source)
