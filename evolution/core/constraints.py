@@ -40,15 +40,16 @@ class ConstraintValidator:
         results = []
 
         # 1. Size limits
-        results.append(self._check_size(artifact_text, artifact_type))
+        results.append(self._check_size(artifact_text, artifact_type, baseline_text))
 
-        # 2. Growth / shrinkage + semantic preservation (if baseline provided).
+        # 2. Growth, shrinkage, and semantic preservation (if baseline provided).
         # For skills, compare markdown bodies so YAML frontmatter cannot mask
         # a collapsed or drifted body.
         if baseline_text:
             evolved_cmp = self._comparison_text(artifact_text, artifact_type)
             baseline_cmp = self._comparison_text(baseline_text, artifact_type)
             results.append(self._check_growth(evolved_cmp, baseline_cmp, artifact_type))
+            results.append(self._check_shrink(evolved_cmp, baseline_cmp))
             results.append(self._check_semantic_preservation(evolved_cmp, baseline_cmp))
 
         # 3. Non-empty. For skills, judge the markdown body: a reassembled
@@ -103,7 +104,7 @@ class ConstraintValidator:
                 message=f"Failed to run tests: {e}",
             )
 
-    def _check_size(self, text: str, artifact_type: str) -> ConstraintResult:
+    def _check_size(self, text: str, artifact_type: str, baseline_text: Optional[str] = None) -> ConstraintResult:
         size = len(text)
         if artifact_type == "skill":
             limit = self.config.max_skill_size
@@ -113,6 +114,11 @@ class ConstraintValidator:
             limit = self.config.max_param_desc_size
         else:
             limit = self.config.max_skill_size  # Default
+
+        # Descriptions that already exceed the cap upstream may keep (not grow
+        # past) their size; the growth check bounds them further.
+        if baseline_text and artifact_type in ("tool_description", "param_description"):
+            limit = max(limit, len(baseline_text))
 
         if size <= limit:
             return ConstraintResult(
@@ -130,30 +136,46 @@ class ConstraintValidator:
     def _check_growth(self, text: str, baseline: str, artifact_type: str) -> ConstraintResult:
         growth = (len(text) - len(baseline)) / max(1, len(baseline))
         max_growth = self.config.max_prompt_growth
-        max_shrink = self.config.max_prompt_shrinkage
 
-        if growth > max_growth:
+        # Short descriptions are bounded by their absolute cap (PLAN: <=500 / <=200
+        # chars), not by relative growth — a 40-char description may need to double.
+        caps = {
+            "tool_description": self.config.max_tool_desc_size,
+            "param_description": self.config.max_param_desc_size,
+        }
+        if artifact_type in caps and len(text) <= caps[artifact_type]:
             return ConstraintResult(
-                passed=False,
+                passed=True,
                 constraint_name="growth_limit",
-                message=f"Growth exceeded: {growth:+.1%} (max {max_growth:+.1%})",
+                message=f"Growth {growth:+.1%} within absolute cap ({len(text)}/{caps[artifact_type]} chars)",
             )
-        if growth < -max_shrink:
+
+        if growth <= max_growth:
             return ConstraintResult(
-                passed=False,
+                passed=True,
                 constraint_name="growth_limit",
-                message=(
-                    f"Shrinkage exceeded: {growth:+.1%} "
-                    f"(max shrinkage {-max_shrink:+.1%})"
-                ),
+                message=f"Growth OK: {growth:+.1%} (max {max_growth:+.1%})",
             )
         return ConstraintResult(
-            passed=True,
+            passed=False,
             constraint_name="growth_limit",
-            message=(
-                f"Size delta OK: {growth:+.1%} "
-                f"(growth ≤ {max_growth:+.1%}, shrink ≥ {-max_shrink:+.1%})"
-            ),
+            message=f"Growth exceeded: {growth:+.1%} (max {max_growth:+.1%})",
+        )
+
+    def _check_shrink(self, text: str, baseline: str) -> ConstraintResult:
+        """Guard against an optimizer gutting the artifact to game the metric."""
+        ratio = len(text) / max(1, len(baseline))
+        floor = self.config.min_size_ratio
+        if ratio >= floor:
+            return ConstraintResult(
+                passed=True,
+                constraint_name="shrink_limit",
+                message=f"Size retained: {ratio:.0%} of baseline (min {floor:.0%})",
+            )
+        return ConstraintResult(
+            passed=False,
+            constraint_name="shrink_limit",
+            message=f"Shrank to {ratio:.0%} of baseline (min {floor:.0%}) — likely lost content",
         )
 
     def _check_semantic_preservation(self, text: str, baseline: str) -> ConstraintResult:
@@ -213,12 +235,11 @@ class ConstraintValidator:
                 constraint_name="non_empty",
                 message="Artifact is non-empty",
             )
-        else:
-            return ConstraintResult(
-                passed=False,
-                constraint_name="non_empty",
-                message="Artifact is empty",
-            )
+        return ConstraintResult(
+            passed=False,
+            constraint_name="non_empty",
+            message="Artifact is empty",
+        )
 
     def _check_skill_structure(self, text: str) -> ConstraintResult:
         """Check that a skill file has valid YAML frontmatter and markdown body."""
@@ -232,16 +253,15 @@ class ConstraintValidator:
                 constraint_name="skill_structure",
                 message="Skill has valid frontmatter (name + description)",
             )
-        else:
-            missing = []
-            if not has_frontmatter:
-                missing.append("YAML frontmatter (---)")
-            if not has_name:
-                missing.append("name field")
-            if not has_description:
-                missing.append("description field")
-            return ConstraintResult(
-                passed=False,
-                constraint_name="skill_structure",
-                message=f"Skill missing: {', '.join(missing)}",
-            )
+        missing = []
+        if not has_frontmatter:
+            missing.append("YAML frontmatter (---)")
+        if not has_name:
+            missing.append("name field")
+        if not has_description:
+            missing.append("description field")
+        return ConstraintResult(
+            passed=False,
+            constraint_name="skill_structure",
+            message=f"Skill missing: {', '.join(missing)}",
+        )

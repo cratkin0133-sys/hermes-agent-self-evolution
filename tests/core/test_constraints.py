@@ -45,17 +45,17 @@ class TestGrowthConstraints:
 
     def test_moderate_shrinkage_is_ok(self, validator):
         baseline = "x" * 1000
-        evolved = "x" * 800  # 20% smaller — within max_prompt_shrinkage
-        result = validator._check_growth(evolved, baseline, "skill")
+        evolved = "x" * 800  # 20% smaller — within min_size_ratio
+        result = validator._check_shrink(evolved, baseline)
         assert result.passed
 
     def test_catastrophic_shrinkage_fails(self, validator):
         """Bug-hunt gap: 8.3k → 97 char collapse must not pass the gates."""
         baseline = "x" * 8300
         evolved = "x" * 97
-        result = validator._check_growth(evolved, baseline, "skill")
+        result = validator._check_shrink(evolved, baseline)
         assert not result.passed
-        assert "Shrinkage exceeded" in result.message
+        assert "Shrank to" in result.message
 
 
 class TestSemanticPreservation:
@@ -154,7 +154,7 @@ class TestValidateAll:
             for r in validator.validate_all(collapsed, "skill", baseline_text=baseline)
         }
         assert results["non_empty"].passed is True  # tiny body is non-empty
-        assert results["growth_limit"].passed is False
+        assert results["shrink_limit"].passed is False
         assert results["semantic_preservation"].passed is False
 
 
@@ -167,3 +167,30 @@ def test_reassembled_skill_passes_structure_check():
     v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
     results = {r.constraint_name: r.passed for r in v.validate_all(full, "skill", baseline_text=full)}
     assert results["skill_structure"] is True
+
+
+def test_shrink_guard_rejects_gutted_artifact():
+    from evolution.core.config import EvolutionConfig
+    from evolution.core.constraints import ConstraintValidator
+    v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
+    res = {r.constraint_name: r.passed for r in v.validate_all("tiny", "skill", baseline_text="x" * 100)}
+    assert res["shrink_limit"] is False
+
+
+def test_tool_description_already_over_cap_may_keep_its_size():
+    from evolution.core.config import EvolutionConfig
+    from evolution.core.constraints import ConstraintValidator
+    v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
+    base = "d" * 700
+    res = {r.constraint_name: r.passed for r in v.validate_all("e" * 690, "tool_description", baseline_text=base)}
+    assert res["size_limit"] and res["growth_limit"] and res["shrink_limit"]
+
+
+def test_short_tool_description_may_grow_up_to_cap_but_not_beyond_relative_limit_when_over_cap():
+    from evolution.core.config import EvolutionConfig
+    from evolution.core.constraints import ConstraintValidator
+    v = ConstraintValidator(EvolutionConfig(hermes_agent_path=None))
+    grow = {r.constraint_name: r.passed for r in v.validate_all("x" * 85, "tool_description", baseline_text="x" * 40)}
+    assert grow["growth_limit"] and grow["size_limit"]
+    bloat = {r.constraint_name: r.passed for r in v.validate_all("x" * 900, "tool_description", baseline_text="x" * 700)}
+    assert not bloat["growth_limit"]

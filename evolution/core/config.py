@@ -30,7 +30,7 @@ class EvolutionConfig:
     max_tool_desc_size: int = 500  # chars
     max_param_desc_size: int = 200  # chars
     max_prompt_growth: float = 0.2  # 20% max growth over baseline
-    max_prompt_shrinkage: float = 0.5  # cannot shrink more than 50% vs baseline
+    min_size_ratio: float = 0.5  # evolved text must keep >= 50% of baseline size
     min_semantic_overlap: float = 0.25  # min significant-word overlap with baseline
 
     # Eval dataset

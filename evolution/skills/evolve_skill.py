@@ -74,7 +74,7 @@ def evolve(
         console.print(f"  Would generate eval dataset (source: {eval_source})")
         console.print(f"  Would run GEPA optimization ({iterations} iterations)")
         console.print(f"  Would validate constraints and create PR")
-        return
+        return {"phase": "skill", "skill_name": skill_name, "accepted": False, "dry_run": True}
 
     # ── 2. Build or load evaluation dataset ─────────────────────────────
     console.print(f"\n[bold]Building evaluation dataset[/bold] (source: {eval_source})")
@@ -198,7 +198,8 @@ def evolve(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(evolved_full)
         console.print(f"  Saved failed variant to {output_path}")
-        return
+        return {"phase": "skill", "skill_name": skill_name, "accepted": False,
+                "rejection_reasons": ["constraint failure"], "output_dir": str(output_path.parent)}
 
     # ── 8. Evaluate on holdout set ──────────────────────────────────────
     console.print(f"\n[bold]Evaluating on holdout set ({len(dataset.holdout)} examples)[/bold]")
@@ -276,6 +277,8 @@ def evolve(
         "holdout_examples": len(dataset.holdout),
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
+        "phase": "skill",
+        "accepted": all_pass and improvement > 0,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
@@ -287,6 +290,9 @@ def evolve(
     else:
         console.print(f"\n[yellow]⚠ Evolution did not improve skill (change: {improvement:+.3f})[/yellow]")
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
+
+    metrics["output_dir"] = str(output_dir)
+    return metrics
 
 
 @click.command()
