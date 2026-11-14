@@ -12,7 +12,8 @@ from typing import Optional
 
 from evolution.core.config import EvolutionConfig
 
-_WORD_RE = re.compile(r"\w{4,}", re.UNICODE)
+# Latin tokens only — Python's \w also glues unspaced CJK into one giant token.
+_LATIN_WORD_RE = re.compile(r"[a-zA-Z0-9_]{4,}")
 
 
 @dataclass
@@ -212,24 +213,14 @@ class ConstraintValidator:
                 message="Evolved text empty while baseline has content",
             )
 
-        baseline_words = set(_WORD_RE.findall(baseline.lower()))
-        evolved_words = set(_WORD_RE.findall(text.lower()))
         minimum = self.config.min_semantic_overlap
-
-        if baseline_words:
-            overlap = len(baseline_words & evolved_words) / len(baseline_words)
-            metric = "term"
-        else:
-            baseline_chars = {c for c in baseline.lower() if c.isalnum()}
-            evolved_chars = {c for c in text.lower() if c.isalnum()}
-            if not baseline_chars:
-                return ConstraintResult(
-                    passed=False,
-                    constraint_name="semantic_preservation",
-                    message="Baseline has no comparable alphanumeric content",
-                )
-            overlap = len(baseline_chars & evolved_chars) / len(baseline_chars)
-            metric = "character"
+        overlap, metric = self._semantic_overlap_ratio(text, baseline)
+        if metric == "unsupported":
+            return ConstraintResult(
+                passed=False,
+                constraint_name="semantic_preservation",
+                message="Baseline has no comparable alphanumeric content",
+            )
 
         if overlap >= minimum:
             return ConstraintResult(
@@ -244,6 +235,36 @@ class ConstraintValidator:
                 f"Semantic drift ({metric}): overlap {overlap:.1%} below minimum {minimum:.1%}"
             ),
         )
+
+    @staticmethod
+    def _cjk_heavy(text: str) -> bool:
+        """True when the text is mostly ideographic / syllabic (no word spaces)."""
+        cjk = sum(
+            1
+            for c in text
+            if ("\u4e00" <= c <= "\u9fff")
+            or ("\u3040" <= c <= "\u30ff")
+            or ("\uac00" <= c <= "\ud7a3")
+        )
+        letters = sum(1 for c in text if c.isalpha())
+        return letters >= 8 and cjk >= letters * 0.4
+
+    def _semantic_overlap_ratio(self, text: str, baseline: str) -> tuple[float, str]:
+        """Return (overlap_ratio, metric_name) using term or character recall."""
+        baseline_words = set(_LATIN_WORD_RE.findall(baseline.lower()))
+        evolved_words = set(_LATIN_WORD_RE.findall(text.lower()))
+        use_character = not baseline_words or self._cjk_heavy(baseline)
+
+        if not use_character:
+            overlap = len(baseline_words & evolved_words) / len(baseline_words)
+            return overlap, "term"
+
+        baseline_chars = {c for c in baseline.lower() if c.isalnum()}
+        evolved_chars = {c for c in text.lower() if c.isalnum()}
+        if not baseline_chars:
+            return 0.0, "unsupported"
+        overlap = len(baseline_chars & evolved_chars) / len(baseline_chars)
+        return overlap, "character"
 
     @staticmethod
     def _skill_markdown_body(text: str) -> str:

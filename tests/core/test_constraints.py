@@ -100,6 +100,14 @@ class TestSemanticPreservation:
         unrelated = "完全に無関係な別の短い指示文です"
         result = validator._check_semantic_preservation(unrelated, baseline)
         assert not result.passed
+        assert "character" in result.message
+
+    def test_cjk_minor_rewrite_passes_character_overlap(self, validator):
+        baseline = "コードレビューではセキュリティ脆弱性とテスト網羅性を必ず確認すること。"
+        evolved = baseline + "詳細なファイル参照を含める。"
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert result.passed
+        assert "character" in result.message
 
 
 class TestNonEmpty:
