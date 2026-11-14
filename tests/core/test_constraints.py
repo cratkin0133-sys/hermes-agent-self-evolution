@@ -43,11 +43,37 @@ class TestGrowthConstraints:
         result = validator._check_growth(evolved, baseline, "skill")
         assert not result.passed
 
-    def test_shrinkage_is_ok(self, validator):
+    def test_moderate_shrinkage_is_ok(self, validator):
         baseline = "x" * 1000
-        evolved = "x" * 800  # 20% smaller
+        evolved = "x" * 800  # 20% smaller — within max_prompt_shrinkage
         result = validator._check_growth(evolved, baseline, "skill")
         assert result.passed
+
+    def test_catastrophic_shrinkage_fails(self, validator):
+        """Bug-hunt gap: 8.3k → 97 char collapse must not pass the gates."""
+        baseline = "x" * 8300
+        evolved = "x" * 97
+        result = validator._check_growth(evolved, baseline, "skill")
+        assert not result.passed
+        assert "Shrinkage exceeded" in result.message
+
+
+class TestSemanticPreservation:
+    def test_retained_terms_pass(self, validator):
+        baseline = "Review pull requests for security bugs and test coverage gaps"
+        evolved = (
+            "When reviewing pull requests, check security bugs carefully "
+            "and report test coverage gaps with concrete examples"
+        )
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert result.passed
+
+    def test_unrelated_rewrite_fails(self, validator):
+        baseline = "Review pull requests for security bugs and test coverage gaps"
+        evolved = "Bake sourdough bread with careful fermentation timing notes"
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert not result.passed
+        assert "Semantic drift" in result.message
 
 
 class TestNonEmpty:
@@ -103,6 +129,33 @@ class TestValidateAll:
         results = {r.constraint_name: r.passed for r in validator.validate_all(skill, "skill")}
         assert results["skill_structure"] is True
         assert results["non_empty"] is False
+
+    def test_collapsed_skill_fails_against_baseline(self, validator):
+        """Frontmatter + tiny body must fail size-delta and semantic gates."""
+        baseline_body = (
+            "# Code review\n\n"
+            "1. Read the pull request description and linked issues\n"
+            "2. Inspect security-sensitive changes for injection risks\n"
+            "3. Verify tests cover the new behavior and edge cases\n"
+            "4. Summarize findings with severity and file references\n"
+        ) * 40  # ~8k chars of meaningful procedure
+        baseline = (
+            "---\nname: requesting-code-review\n"
+            "description: Request a thorough code review\n---\n\n"
+            + baseline_body
+        )
+        collapsed = (
+            "---\nname: requesting-code-review\n"
+            "description: Request a thorough code review\n---\n\n"
+            "Be brief.\n"
+        )
+        results = {
+            r.constraint_name: r
+            for r in validator.validate_all(collapsed, "skill", baseline_text=baseline)
+        }
+        assert results["non_empty"].passed is True  # tiny body is non-empty
+        assert results["growth_limit"].passed is False
+        assert results["semantic_preservation"].passed is False
 
 
 def test_reassembled_skill_passes_structure_check():

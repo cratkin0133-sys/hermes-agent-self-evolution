@@ -4,12 +4,15 @@ Every candidate variant must pass ALL constraints before it can be
 considered valid. Failed constraints = immediate rejection.
 """
 
+import re
 import subprocess
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
 from evolution.core.config import EvolutionConfig
+
+_WORD_RE = re.compile(r"[a-zA-Z0-9_]{4,}")
 
 
 @dataclass
@@ -39,9 +42,14 @@ class ConstraintValidator:
         # 1. Size limits
         results.append(self._check_size(artifact_text, artifact_type))
 
-        # 2. Growth limit (if baseline provided)
+        # 2. Growth / shrinkage + semantic preservation (if baseline provided).
+        # For skills, compare markdown bodies so YAML frontmatter cannot mask
+        # a collapsed or drifted body.
         if baseline_text:
-            results.append(self._check_growth(artifact_text, baseline_text, artifact_type))
+            evolved_cmp = self._comparison_text(artifact_text, artifact_type)
+            baseline_cmp = self._comparison_text(baseline_text, artifact_type)
+            results.append(self._check_growth(evolved_cmp, baseline_cmp, artifact_type))
+            results.append(self._check_semantic_preservation(evolved_cmp, baseline_cmp))
 
         # 3. Non-empty. For skills, judge the markdown body: a reassembled
         # file always starts with YAML frontmatter.
@@ -122,19 +130,65 @@ class ConstraintValidator:
     def _check_growth(self, text: str, baseline: str, artifact_type: str) -> ConstraintResult:
         growth = (len(text) - len(baseline)) / max(1, len(baseline))
         max_growth = self.config.max_prompt_growth
+        max_shrink = self.config.max_prompt_shrinkage
 
-        if growth <= max_growth:
-            return ConstraintResult(
-                passed=True,
-                constraint_name="growth_limit",
-                message=f"Growth OK: {growth:+.1%} (max {max_growth:+.1%})",
-            )
-        else:
+        if growth > max_growth:
             return ConstraintResult(
                 passed=False,
                 constraint_name="growth_limit",
                 message=f"Growth exceeded: {growth:+.1%} (max {max_growth:+.1%})",
             )
+        if growth < -max_shrink:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="growth_limit",
+                message=(
+                    f"Shrinkage exceeded: {growth:+.1%} "
+                    f"(max shrinkage {-max_shrink:+.1%})"
+                ),
+            )
+        return ConstraintResult(
+            passed=True,
+            constraint_name="growth_limit",
+            message=(
+                f"Size delta OK: {growth:+.1%} "
+                f"(growth ≤ {max_growth:+.1%}, shrink ≥ {-max_shrink:+.1%})"
+            ),
+        )
+
+    def _check_semantic_preservation(self, text: str, baseline: str) -> ConstraintResult:
+        """Reject variants that drift away from the baseline's significant terms.
+
+        Uses significant-word recall (words of length ≥ 4) against the baseline.
+        Catches catastrophic rewrites and near-empty collapses that still have
+        a few leftover tokens — the README's semantic-preservation guardrail.
+        """
+        baseline_words = set(_WORD_RE.findall(baseline.lower()))
+        if not baseline_words:
+            return ConstraintResult(
+                passed=True,
+                constraint_name="semantic_preservation",
+                message="No significant baseline terms to compare",
+            )
+
+        evolved_words = set(_WORD_RE.findall(text.lower()))
+        overlap = len(baseline_words & evolved_words) / len(baseline_words)
+        minimum = self.config.min_semantic_overlap
+
+        if overlap >= minimum:
+            return ConstraintResult(
+                passed=True,
+                constraint_name="semantic_preservation",
+                message=f"Semantic overlap OK: {overlap:.1%} (min {minimum:.1%})",
+            )
+        return ConstraintResult(
+            passed=False,
+            constraint_name="semantic_preservation",
+            message=(
+                f"Semantic drift: overlap {overlap:.1%} below minimum {minimum:.1%} "
+                f"({len(baseline_words & evolved_words)}/{len(baseline_words)} terms retained)"
+            ),
+        )
 
     def _non_empty_text(self, text: str, artifact_type: str) -> str:
         """Markdown body for skills; the original text for other artifacts."""
@@ -147,6 +201,10 @@ class ConstraintValidator:
         if len(parts) < 3:
             return text
         return parts[2]
+
+    def _comparison_text(self, text: str, artifact_type: str) -> str:
+        """Text used for size-delta and semantic checks against a baseline."""
+        return self._non_empty_text(text, artifact_type)
 
     def _check_non_empty(self, text: str) -> ConstraintResult:
         if text.strip():
