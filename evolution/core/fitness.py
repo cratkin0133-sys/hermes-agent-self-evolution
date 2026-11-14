@@ -177,7 +177,7 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
     ``metric.fallbacks``.
     """
     lock = threading.Lock()
-    state = {"judge_calls": 0}
+    state = {"judge_calls": 0, "first_completed": False}
 
     def metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -> dspy.Prediction:
         agent_output = getattr(pred, "output", "") or ""
@@ -188,27 +188,37 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
             )
         if metric.config_error is not None:
             raise metric.config_error
-        with lock:
-            first = state["judge_calls"] == 0
-            state["judge_calls"] += 1
         skill_text = getattr(pred, "skill_text", "") or ""
+        score_kwargs = dict(
+            task_input=gold.task_input,
+            expected_behavior=gold.expected_behavior,
+            agent_output=agent_output,
+            skill_text=skill_text,
+            artifact_size=len(skill_text) if max_size else None,
+            max_size=max_size,
+        )
+        with lock:
+            if metric.config_error is not None:
+                raise metric.config_error
+            if not state["first_completed"]:
+                try:
+                    fitness = judge.score(**score_kwargs)
+                except Exception as e:
+                    err = RuntimeError(
+                        f"LLM judge failed on first call: {type(e).__name__}: {e} "
+                        "\u2014 check --judge-model and its API key"
+                    )
+                    metric.config_error = err
+                    state["first_completed"] = True
+                    state["judge_calls"] += 1
+                    raise err from e
+                state["first_completed"] = True
+                state["judge_calls"] += 1
+                return dspy.Prediction(score=fitness.composite, feedback=fitness.feedback)
+            state["judge_calls"] += 1
         try:
-            fitness = judge.score(
-                task_input=gold.task_input,
-                expected_behavior=gold.expected_behavior,
-                agent_output=agent_output,
-                skill_text=skill_text,
-                artifact_size=len(skill_text) if max_size else None,
-                max_size=max_size,
-            )
+            fitness = judge.score(**score_kwargs)
         except Exception as e:
-            if first:
-                err = RuntimeError(
-                    f"LLM judge failed on first call: {type(e).__name__}: {e} "
-                    "\u2014 check --judge-model and its API key"
-                )
-                metric.config_error = err
-                raise err from e
             with lock:
                 metric.fallbacks += 1
             fallback = skill_gepa_metric(gold, pred)
