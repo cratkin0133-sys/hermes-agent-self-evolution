@@ -97,6 +97,13 @@ class TestValidateAll:
         failed = [r for r in results if not r.passed]
         assert len(failed) > 0
 
+    def test_frontmatter_only_skill_fails_non_empty(self, validator):
+        """YAML frontmatter must not satisfy non_empty when the body collapsed."""
+        skill = "---\nname: test\ndescription: Test skill\n---\n\n   \n"
+        results = {r.constraint_name: r.passed for r in validator.validate_all(skill, "skill")}
+        assert results["skill_structure"] is True
+        assert results["non_empty"] is False
+
 
 def test_reassembled_skill_passes_structure_check():
     """Regression: evolve_skill must validate the reassembled file, not the bare body."""
