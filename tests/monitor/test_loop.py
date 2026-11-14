@@ -103,3 +103,20 @@ def test_bench_small_drop_within_max_regression_passes(tmp_path):
     r = _bench(tmp_path, 0.89)
     assert r.exit_code == 0, r.output
     assert _bench(tmp_path, 0.5, ("--max-regression", "0.5")).exit_code == 0
+
+
+def test_bench_regressed_run_does_not_become_baseline(tmp_path):
+    assert _bench(tmp_path, 0.9).exit_code == 0
+    second = _bench(tmp_path, 0.5)
+    assert second.exit_code == 1 and "REGRESSION" in second.output
+    row = MetricsStore(tmp_path / "m.db").last_run("benchmark", "tb")
+    assert row["evolved"] == 0.5 and row["accepted"] == 0
+    third = _bench(tmp_path, 0.5)
+    assert third.exit_code == 1, third.output
+    assert "REGRESSION" in third.output and "prev 0.9" in third.output
+
+
+def test_bench_regression_epsilon(tmp_path):
+    assert _bench(tmp_path, 0.8).exit_code == 0
+    r = _bench(tmp_path, 0.7, ("--max-regression", "0.1"))
+    assert r.exit_code == 0, r.output
