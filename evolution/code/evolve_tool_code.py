@@ -33,6 +33,7 @@ import click
 from rich.console import Console
 
 from evolution.code.code_guards import check_guards
+from evolution.code.github_issues import Issue, fetch_issue, issue_to_bug_text
 from evolution.code.mutator import apply_blocks, propose
 from evolution.core.config import resolve_hermes_agent_path
 from evolution.core.lm import make_lm
@@ -130,7 +131,7 @@ def select_parent(pop: list[Organism], rng: random.Random, sharpness: float = 10
 
 def evolve_tool_code(
     repro: str,
-    bug: str,
+    bug: Optional[str] = None,
     tool: Optional[str] = None,
     file: Optional[str] = None,
     test_cmd: str = "python -m pytest tests/ -q -x",
@@ -141,7 +142,21 @@ def evolve_tool_code(
     output_root: Path = Path("output"),
     create_pr_branch: bool = False,
     seed: int = 0,
+    bug_issue: Optional[int] = None,
+    issue_repo: str = "NousResearch/hermes-agent",
 ) -> dict:
+    if bug and bug_issue is not None:
+        raise ValueError("Pass either bug or bug_issue, not both")
+    if not bug and bug_issue is None:
+        raise ValueError("Pass bug or bug_issue")
+    issue: Optional[Issue] = None
+    if bug_issue is not None:
+        try:
+            issue = fetch_issue(issue_repo, bug_issue)
+        except (RuntimeError, ValueError) as e:
+            console.print(f"[red]✗ Could not fetch {issue_repo}#{bug_issue}: {e}[/red]")
+            sys.exit(1)
+        bug = issue_to_bug_text(issue)
     repo = resolve_hermes_agent_path(hermes_repo)
     target = (repo / file) if file else find_tool_file(repo, tool or "")
     if not target or not target.exists():
@@ -195,9 +210,13 @@ def evolve_tool_code(
         "best_score": best.score, "repro_passes": best.repro_ok, "tests_pass": best.tests_ok,
         "organisms_evaluated": evaluated, "population_size": len(pop), "diagnosis": best.diagnosis, "model": model,
     }
+    title = f"Fix #{issue.number}: {issue.title}" if issue else f"Fix: {bug}"
+    if issue:
+        metrics["issue_url"] = issue.url
     changes = {rel: (baseline, best.source)} if best.source != baseline else {}
     write_review_bundle(
-        out_dir, f"Fix: {bug}",
+        out_dir, title,
+        (f"Fixes {issue.url}\n\n" if issue else "") +
         f"Evolved fix for `{rel}`.\n\n**Diagnosis:** {best.diagnosis}\n\n**Reproduction:** `{repro}` → "
         f"{'passes' if best.repro_ok else 'still fails'}. **Tests:** `{test_cmd}` → {'pass' if best.tests_ok else 'fail'}.\n\n"
         "Every line of evolved code needs human review before merge.",
@@ -209,7 +228,7 @@ def evolve_tool_code(
         console.print("[bold green]✓ Fix found: reproduction and tests pass, guards hold[/bold green]")
         if create_pr_branch:
             branch = f"evolve/code-{Path(rel).stem}-{datetime.now():%Y%m%d-%H%M%S}"
-            wt = create_branch(repo, branch, {rel: best.source}, f"Fix: {bug}", out_dir / "worktree")
+            wt = create_branch(repo, branch, {rel: best.source}, title, out_dir / "worktree")
             console.print(f"  Branch {branch} committed in {wt}" if wt else "  [yellow]not a git repo; no branch[/yellow]")
     else:
         console.print("[yellow]⚠ No accepted fix — see evolution_log.txt[/yellow]")
@@ -221,18 +240,22 @@ def evolve_tool_code(
 @click.option("--tool", default=None, help="Tool name; its file is found via registry.register(name=...)")
 @click.option("--file", default=None, help="Or a repo-relative path to the file to evolve")
 @click.option("--repro", required=True, help="Command that reproduces the bug: must FAIL now and PASS when fixed")
-@click.option("--bug", required=True, help="Bug description (e.g. the GitHub issue text)")
+@click.option("--bug", default=None, help="Bug description (e.g. the GitHub issue text)")
+@click.option("--bug-issue", type=int, default=None, help="Or a GitHub issue number to fetch the bug text from")
+@click.option("--issue-repo", default="NousResearch/hermes-agent", help="owner/name repo for --bug-issue")
 @click.option("--test-cmd", default="python -m pytest tests/ -q -x", help="Regression suite; must pass")
 @click.option("--iterations", default=10)
 @click.option("--model", default="openai/gpt-4.1", help="Mutator model")
 @click.option("--timeout", default=1800, help="Per-command timeout (s)")
 @click.option("--hermes-repo", default=None)
 @click.option("--create-branch", "create_pr_branch", is_flag=True)
-def main(tool, file, repro, bug, test_cmd, iterations, model, timeout, hermes_repo, create_pr_branch):
+def main(tool, file, repro, bug, bug_issue, issue_repo, test_cmd, iterations, model, timeout, hermes_repo, create_pr_branch):
     """Evolve a tool's code until a bug reproduction passes without breaking tests."""
     if not (tool or file):
         raise click.UsageError("Pass --tool or --file")
-    evolve_tool_code(repro=repro, bug=bug, tool=tool, file=file, test_cmd=test_cmd, iterations=iterations,
+    if (bug is None) == (bug_issue is None):
+        raise click.UsageError("Pass exactly one of --bug or --bug-issue")
+    evolve_tool_code(repro=repro, bug=bug, bug_issue=bug_issue, issue_repo=issue_repo, tool=tool, file=file, test_cmd=test_cmd, iterations=iterations,
                      model=model, hermes_repo=hermes_repo, timeout=timeout, create_pr_branch=create_pr_branch)
 
 
