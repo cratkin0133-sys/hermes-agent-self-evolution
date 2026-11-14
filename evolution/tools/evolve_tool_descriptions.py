@@ -47,6 +47,7 @@ def evolve_tool_descriptions(
     regression_tolerance: float = 0.0,
     benchmark_cmd: Optional[str] = None,
     benchmark_max_regression: float = 0.02,
+    benchmark_timeout: int = 3600,
     dry_run: bool = False,
 ) -> dict:
     repo = resolve_hermes_agent_path(hermes_repo)
@@ -122,23 +123,36 @@ def evolve_tool_descriptions(
     console.print(table)
 
     changes = literal_changes(repo, found, evolved_partial)
-    bench = None
-    if benchmark_cmd and changes and constraint_ok:
-        console.print(f"\n  Running benchmark gate: {benchmark_cmd}")
-        bench = compare_benchmark(repo, {k: v[1] for k, v in changes.items()}, benchmark_cmd,
-                                  max_regression=benchmark_max_regression)
-        console.print(f"  [{'green' if bench.passed else 'red'}]{bench.message}[/]")
-    bench_ok = bench is None or bench.passed
+    reasons = []
+    if not changed:
+        reasons.append("no description changed")
+    if not constraint_ok:
+        reasons.append("constraint failure")
+    if regressions:
+        reasons.append(f"per-tool regression: {regressions}")
+    if not overall_e > overall_b:
+        reasons.append("no holdout improvement")
 
-    accepted = bool(changed) and constraint_ok and not regressions and overall_e > overall_b and bench_ok
+    # The benchmark is the most expensive gate: only run it when everything else passed.
+    bench = None
+    if benchmark_cmd and changes and not reasons:
+        console.print(f"\n  Running benchmark gate: {escape(benchmark_cmd)}")
+        bench = compare_benchmark(repo, {k: v[1] for k, v in changes.items()}, benchmark_cmd,
+                                  max_regression=benchmark_max_regression, timeout=benchmark_timeout)
+        console.print(f"  [{'green' if bench.passed else 'red'}]{escape(bench.message)}[/]")
+        if not bench.passed:
+            reasons.append("benchmark gate failed")
+
+    accepted = not reasons
     out_dir = output_root / "tools" / datetime.now().strftime("%Y%m%d_%H%M%S")
     metrics = {
-        "phase": "tool_descriptions", "accepted": accepted, "baseline_accuracy": overall_b,
+        "phase": "tool_descriptions", "accepted": accepted, "rejection_reasons": reasons,
+        "baseline_accuracy": overall_b,
         "evolved_accuracy": overall_e, "improvement": overall_e - overall_b, "changed_tools": sorted(changed),
         "regressions": regressions,
         "benchmark": benchmark_metrics(bench), "per_tool_baseline": base_acc, "per_tool_evolved": evo_acc,
         "holdout_examples": len(holdout), "elapsed_seconds": round(elapsed, 1),
-        "optimizer_model": optimizer_model, "eval_model": eval_model,
+        "optimizer_model": optimizer_model, "eval_model": eval_model, "output_dir": str(out_dir),
     }
 
     write_review_bundle(
@@ -150,10 +164,7 @@ def evolve_tool_descriptions(
     console.print(f"\n  Review bundle: {out_dir}/PR_BODY.md")
 
     if not accepted:
-        reason = ("no description changed" if not changed else "constraint failure" if not constraint_ok
-                  else f"per-tool regression: {regressions}" if regressions
-                  else "benchmark gate failed" if not bench_ok else "no holdout improvement")
-        console.print(f"[yellow]⚠ Not accepted: {reason}[/yellow]")
+        console.print(f"[yellow]⚠ Not accepted: {escape('; '.join(reasons))}[/yellow]")
     else:
         console.print(f"[bold green]✓ Accepted: accuracy {overall_e - overall_b:+.3f}[/bold green]")
         if create_pr_branch:
@@ -161,8 +172,6 @@ def evolve_tool_descriptions(
             wt = create_branch(repo, branch, {k: v[1] for k, v in changes.items()},
                                "Evolve tool descriptions via GEPA", out_dir / "worktree")
             console.print(f"  Branch {branch} committed in {wt}" if wt else "  [yellow]hermes repo is not git; no branch[/yellow]")
-    metrics["rejection_reasons"] = [] if accepted else [reason]
-    metrics["output_dir"] = str(out_dir)
     return metrics
 
 
@@ -175,17 +184,18 @@ def evolve_tool_descriptions(
 @click.option("--eval-model", default="openai/gpt-4.1-mini")
 @click.option("--hermes-repo", default=None)
 @click.option("--create-branch", "create_pr_branch", is_flag=True, help="Commit accepted result on a branch in a hermes-agent worktree")
-@click.option("--benchmark-cmd", default=None, help="Command run in a hermes-agent worktree with the change; must exit 0 and print SCORE=<n>")
+@click.option("--benchmark-cmd", default=None, help="Command run on baseline and evolved hermes-agent worktrees; score from SCORE=<n>, JSON {\"score\": n} or pytest summary")
 @click.option("--benchmark-max-regression", default=0.02, type=float, help="Max allowed benchmark score drop vs baseline")
+@click.option("--benchmark-timeout", default=3600, type=int, help="Seconds per benchmark run; a timeout fails the gate")
 @click.option("--dry-run", is_flag=True)
 def main(tools, iterations, dataset_path, per_tool, optimizer_model, eval_model, hermes_repo, create_pr_branch,
-         benchmark_cmd, benchmark_max_regression, dry_run):
+         benchmark_cmd, benchmark_max_regression, benchmark_timeout, dry_run):
     """Evolve tool descriptions with GEPA, gated on per-tool selection accuracy."""
     evolve_tool_descriptions(
         tools=tools.split(",") if tools else None, iterations=iterations, dataset_path=dataset_path,
         per_tool=per_tool, optimizer_model=optimizer_model, eval_model=eval_model,
         hermes_repo=hermes_repo, create_pr_branch=create_pr_branch, benchmark_cmd=benchmark_cmd,
-        benchmark_max_regression=benchmark_max_regression, dry_run=dry_run,
+        benchmark_max_regression=benchmark_max_regression, benchmark_timeout=benchmark_timeout, dry_run=dry_run,
     )
 
 

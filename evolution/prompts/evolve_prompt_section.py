@@ -47,6 +47,7 @@ def evolve_prompt_sections(
     must_keep: Optional[list[str]] = None,
     benchmark_cmd: Optional[str] = None,
     benchmark_max_regression: float = 0.0,
+    benchmark_timeout: int = 3600,
     hermes_repo: Optional[str] = None,
     output_root: Path = Path("output"),
     create_pr_branch: bool = False,
@@ -124,13 +125,6 @@ def evolve_prompt_sections(
     console.print(table)
 
     changes = literal_changes(repo, found, evolved)
-    bench = None
-    if benchmark_cmd and changes and not failures:
-        console.print(f"\n  Running benchmark gate: {benchmark_cmd}")
-        bench = compare_benchmark(repo, {k: v[1] for k, v in changes.items()}, benchmark_cmd,
-                                  max_regression=benchmark_max_regression)
-        console.print(f"  [{'green' if bench.passed else 'red'}]{bench.message}[/]")
-
     reasons = []
     if not changed:
         reasons.append("no section changed")
@@ -140,8 +134,16 @@ def evolve_prompt_sections(
         reasons.append(f"section regression: {regressions}")
     if overall_e - overall_b <= min_improvement:
         reasons.append(f"improvement {overall_e - overall_b:+.3f} not above {min_improvement}")
-    if bench is not None and not bench.passed:
-        reasons.append("benchmark gate failed")
+
+    # The benchmark is the most expensive gate: only run it when everything else passed.
+    bench = None
+    if benchmark_cmd and changes and not reasons:
+        console.print(f"\n  Running benchmark gate: {escape(benchmark_cmd)}")
+        bench = compare_benchmark(repo, {k: v[1] for k, v in changes.items()}, benchmark_cmd,
+                                  max_regression=benchmark_max_regression, timeout=benchmark_timeout)
+        console.print(f"  [{'green' if bench.passed else 'red'}]{escape(bench.message)}[/]")
+        if not bench.passed:
+            reasons.append("benchmark gate failed")
     accepted = not reasons
 
     out_dir = output_root / "prompts" / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -168,7 +170,7 @@ def evolve_prompt_sections(
                                "Evolve system-prompt sections via GEPA", out_dir / "worktree")
             console.print(f"  Branch {branch} committed in {wt}" if wt else "  [yellow]hermes repo is not git; no branch[/yellow]")
     else:
-        console.print(f"[yellow]⚠ Not accepted: {'; '.join(reasons)}[/yellow]")
+        console.print(f"[yellow]⚠ Not accepted: {escape('; '.join(reasons))}[/yellow]")
     metrics["output_dir"] = str(out_dir)
     return metrics
 
@@ -182,21 +184,23 @@ def evolve_prompt_sections(
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model that plays the agent")
 @click.option("--judge-model", default=None, help="Model that scores behaviour (default: optimizer model)")
 @click.option("--must-keep", default=None, help="Comma-separated phrases that must survive evolution")
-@click.option("--benchmark-cmd", default=None, help="Command run in a hermes-agent worktree with the change; must exit 0 and print SCORE=<n>")
+@click.option("--benchmark-cmd", default=None, help="Command run on baseline and evolved hermes-agent worktrees; score from SCORE=<n>, JSON {\"score\": n} or pytest summary")
 @click.option("--benchmark-max-regression", default=0.0, type=float, help="Max allowed benchmark score drop vs baseline")
+@click.option("--benchmark-timeout", default=3600, type=int, help="Seconds per benchmark run; a timeout fails the gate")
 @click.option("--min-improvement", default=0.0, type=float)
 @click.option("--max-growth", default=0.2, type=float, help="Max per-section growth (PLAN default 0.2 = +20%)")
 @click.option("--hermes-repo", default=None)
 @click.option("--create-branch", "create_pr_branch", is_flag=True)
 @click.option("--dry-run", is_flag=True)
 def main(sections, iterations, dataset_path, per_section, optimizer_model, eval_model, judge_model,
-         must_keep, benchmark_cmd, benchmark_max_regression, min_improvement, max_growth, hermes_repo, create_pr_branch, dry_run):
+         must_keep, benchmark_cmd, benchmark_max_regression, benchmark_timeout, min_improvement, max_growth, hermes_repo, create_pr_branch, dry_run):
     """Evolve system-prompt sections with GEPA under strict behavioural gates."""
     evolve_prompt_sections(
         sections=list(sections) or None, iterations=iterations, dataset_path=dataset_path,
         per_section=per_section, optimizer_model=optimizer_model, eval_model=eval_model,
         judge_model=judge_model, must_keep=must_keep.split(",") if must_keep else None,
         benchmark_cmd=benchmark_cmd, benchmark_max_regression=benchmark_max_regression,
+        benchmark_timeout=benchmark_timeout,
         min_improvement=min_improvement, max_growth=max_growth, hermes_repo=hermes_repo,
         create_pr_branch=create_pr_branch, dry_run=dry_run,
     )

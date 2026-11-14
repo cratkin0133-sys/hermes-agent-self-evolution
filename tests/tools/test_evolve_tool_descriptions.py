@@ -108,3 +108,55 @@ def test_normalize_choice_prefers_exact_and_longest():
     assert normalize_choice("`read_file`", names) == "read_file"
     assert normalize_choice("I would use read_file here", names) == "read_file"
     assert normalize_choice("None", names) == "none"
+
+
+def _marker_cmd(marker):
+    import shlex
+    return shlex.join([sys.executable, "-c", f"import pathlib; pathlib.Path({str(marker)!r}).write_text('x'); print('SCORE=1')"])
+
+
+def test_phase2_benchmark_not_run_when_cheaper_gates_reject(fake_repo, tmp_path, monkeypatch):
+    repo, ds = fake_repo
+    route = lambda model, **k: fake_lm(reflector if "reflect" in model else selector, model)
+    monkeypatch.setattr(etd, "make_lm", route)
+    monkeypatch.setattr(mc, "make_lm", route)
+    # A change that does not alter selection: changes exist, constraints pass, no improvement.
+    monkeypatch.setattr(etd, "optimize_components",
+                        lambda baseline, *a, **k: {**baseline, "read_file": baseline["read_file"] + " Extra."})
+    marker = tmp_path / "bench_ran"
+    m = etd.evolve_tool_descriptions(
+        iterations=4, dataset_path=str(ds), optimizer_model="openai/fake-reflect",
+        eval_model="openai/fake-select", hermes_repo=str(repo), output_root=tmp_path / "out",
+        benchmark_cmd=_marker_cmd(marker),
+    )
+    assert not m["accepted"]
+    assert m["rejection_reasons"] == ["no holdout improvement"]
+    assert not marker.exists()
+    assert m["benchmark"] is None
+    bundle = json.loads((tmp_path / "out").glob("tools/*/metrics.json").__next__().read_text())
+    assert bundle["rejection_reasons"] == ["no holdout improvement"]
+    assert bundle["output_dir"] == m["output_dir"]
+
+
+def test_phase2_benchmark_timeout_rejects(fake_repo, tmp_path, monkeypatch):
+    repo, ds = fake_repo
+    route = lambda model, **k: fake_lm(reflector if "reflect" in model else selector, model)
+    monkeypatch.setattr(etd, "make_lm", route)
+    monkeypatch.setattr(mc, "make_lm", route)
+    m = etd.evolve_tool_descriptions(
+        iterations=4, dataset_path=str(ds), optimizer_model="openai/fake-reflect",
+        eval_model="openai/fake-select", hermes_repo=str(repo), output_root=tmp_path / "out",
+        benchmark_cmd=f'{sys.executable} -c "import time; time.sleep(30)"', benchmark_timeout=1,
+    )
+    assert not m["accepted"]
+    assert m["rejection_reasons"] == ["benchmark gate failed"]
+    assert m["benchmark"]["message"].startswith("inconclusive:")
+
+
+def test_phase2_cli_accepts_benchmark_timeout(monkeypatch):
+    from click.testing import CliRunner
+    seen = {}
+    monkeypatch.setattr(etd, "evolve_tool_descriptions", lambda **kw: seen.update(kw))
+    res = CliRunner().invoke(etd.main, ["--benchmark-cmd", "x", "--benchmark-timeout", "7"])
+    assert res.exit_code == 0, res.output
+    assert seen["benchmark_timeout"] == 7

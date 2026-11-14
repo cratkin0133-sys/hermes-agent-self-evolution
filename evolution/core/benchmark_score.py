@@ -5,13 +5,15 @@ import re
 from typing import Optional
 
 _SCORE_RE = re.compile(r"^\s*SCORE\s*[=:]\s*([0-9]*\.?[0-9]+)\s*$", re.IGNORECASE)
+_PYTEST_COUNT_RE = re.compile(r"(\d+) (passed|failed)")
 
 
 def parse_score(output: str) -> Optional[float]:
     """Return a score from ``output``, or None.
 
     Rules in priority order: (a) last ``SCORE=<float>`` line, (b) last line that
-    is a JSON object with a numeric ``"score"``, (c) pytest summary pass ratio.
+    is a JSON object with a numeric ``"score"``, (c) pytest summary pass ratio from the last line that holds a
+    ``<n> passed`` or ``<n> failed`` count.
     """
     lines = output.splitlines()
 
@@ -31,11 +33,8 @@ def parse_score(output: str) -> Optional[float]:
                 return float(score)
 
     for line in reversed(lines):
-        if not (
-            re.search(r"\d+ passed", line)
-            or re.search(r"\d+ failed(?:,|\s+in\b|\s*=|$)", line)
-        ):
-            continue
+        if not _PYTEST_COUNT_RE.search(line):
+            continue  # e.g. "upload failed": mentions failed but is no summary
 
         def count(pattern: str) -> int:
             m = re.search(pattern, line)
@@ -43,6 +42,5 @@ def parse_score(output: str) -> Optional[float]:
 
         passed = count(r"(\d+) passed")
         total = passed + count(r"(\d+) failed") + count(r"(\d+) errors?")
-        if total > 0:
-            return passed / total
+        return passed / total if total > 0 else None
     return None
