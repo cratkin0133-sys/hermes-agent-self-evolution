@@ -249,22 +249,48 @@ class ConstraintValidator:
         letters = sum(1 for c in text if c.isalpha())
         return letters >= 8 and cjk >= letters * 0.4
 
+    @staticmethod
+    def _semantic_bigrams(text: str) -> set[str]:
+        """Adjacent character pairs for scripts without clear word boundaries."""
+        chars = [
+            c
+            for c in text.lower()
+            if c.isalnum()
+            or ("\u4e00" <= c <= "\u9fff")
+            or ("\u3040" <= c <= "\u30ff")
+            or ("\uac00" <= c <= "\ud7a3")
+        ]
+        if len(chars) < 2:
+            return set()
+        return {chars[i] + chars[i + 1] for i in range(len(chars) - 1)}
+
     def _semantic_overlap_ratio(self, text: str, baseline: str) -> tuple[float, str]:
-        """Return (overlap_ratio, metric_name) using term or character recall."""
+        """Return (overlap_ratio, metric_name). Uses the strictest applicable metric."""
+        scores: list[float] = []
+        parts: list[str] = []
+
         baseline_words = set(_LATIN_WORD_RE.findall(baseline.lower()))
         evolved_words = set(_LATIN_WORD_RE.findall(text.lower()))
-        use_character = not baseline_words or self._cjk_heavy(baseline)
+        if baseline_words:
+            scores.append(len(baseline_words & evolved_words) / len(baseline_words))
+            parts.append("term")
 
-        if not use_character:
-            overlap = len(baseline_words & evolved_words) / len(baseline_words)
-            return overlap, "term"
+        if self._cjk_heavy(baseline):
+            baseline_bigrams = self._semantic_bigrams(baseline)
+            evolved_bigrams = self._semantic_bigrams(text)
+            if baseline_bigrams:
+                scores.append(len(baseline_bigrams & evolved_bigrams) / len(baseline_bigrams))
+                parts.append("bigram")
 
-        baseline_chars = {c for c in baseline.lower() if c.isalnum()}
-        evolved_chars = {c for c in text.lower() if c.isalnum()}
-        if not baseline_chars:
-            return 0.0, "unsupported"
-        overlap = len(baseline_chars & evolved_chars) / len(baseline_chars)
-        return overlap, "character"
+        if not scores:
+            baseline_chars = {c for c in baseline.lower() if c.isalnum()}
+            evolved_chars = {c for c in text.lower() if c.isalnum()}
+            if not baseline_chars:
+                return 0.0, "unsupported"
+            scores.append(len(baseline_chars & evolved_chars) / len(baseline_chars))
+            parts.append("character")
+
+        return min(scores), "+".join(parts)
 
     @staticmethod
     def _skill_markdown_body(text: str) -> str:
