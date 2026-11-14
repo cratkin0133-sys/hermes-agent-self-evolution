@@ -129,6 +129,124 @@ class TestSemanticPreservation:
         assert not result.passed
         assert "term" in result.message
 
+    def test_negated_near_copy_fails_despite_word_overlap(self, validator):
+        """Same vocabulary with the instruction reversed must not deploy."""
+        baseline = (
+            "Always inspect security vulnerabilities and test coverage "
+            "before approving the pull request."
+        )
+        evolved = (
+            "Never inspect security vulnerabilities and test coverage "
+            "before approving the pull request."
+        )
+        overlap, _metric = validator._semantic_overlap_ratio(evolved, baseline)
+        assert overlap >= validator.config.min_semantic_overlap
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert not result.passed
+        assert "Instruction reversal" in result.message
+        assert "negated" in result.message
+
+    def test_must_not_and_contraction_reverse_the_directive(self, validator):
+        baseline = "You must verify tests cover the new behavior and edge cases."
+        must_not = "You must not verify tests cover the new behavior and edge cases."
+        result = validator._check_semantic_preservation(must_not, baseline)
+        assert not result.passed
+        assert "negated" in result.message
+
+        baseline = "Inspect security vulnerabilities before approving the pull request."
+        contracted = "Don't inspect security vulnerabilities before approving the pull request."
+        result = validator._check_semantic_preservation(contracted, baseline)
+        assert not result.passed
+        assert "negated" in result.message
+
+    def test_relation_swap_fails_despite_shared_vocabulary(self, validator):
+        baseline = "Inspect security vulnerabilities before approving the pull request."
+        evolved = "Inspect security vulnerabilities after approving the pull request."
+        overlap, _metric = validator._semantic_overlap_ratio(evolved, baseline)
+        assert overlap >= validator.config.min_semantic_overlap
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert not result.passed
+        assert "inverted" in result.message
+
+        baseline = "Accept security fixes that include regression tests before merging."
+        evolved = "Reject security fixes that include regression tests before merging."
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert not result.passed
+        assert "Instruction reversal" in result.message
+
+    def test_one_reversed_step_fails_the_skill(self, validator):
+        baseline = (
+            "Read the pull request description and linked issues.\n"
+            "Inspect security-sensitive changes for injection risks.\n"
+            "Verify tests cover the new behavior and edge cases.\n"
+        )
+        evolved = (
+            "Read the pull request description and linked issues.\n"
+            "Inspect security-sensitive changes for injection risks.\n"
+            "Do not verify tests cover the new behavior and edge cases.\n"
+        )
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert not result.passed
+        assert "negated" in result.message
+
+    def test_caution_and_double_negation_paraphrase_still_pass(self, validator):
+        baseline = "Always inspect security vulnerabilities before approving the pull request."
+        caution = (
+            "Always inspect security vulnerabilities before approving the pull request. "
+            "Do not skip the security vulnerabilities inspection."
+        )
+        assert validator._check_semantic_preservation(caution, baseline).passed
+
+        paraphrase = (
+            "Do not approve the pull request without first inspecting security vulnerabilities."
+        )
+        result = validator._check_semantic_preservation(paraphrase, baseline)
+        assert result.passed
+
+        elaborated = (
+            "After deploying, inspect security vulnerabilities before approving the pull request."
+        )
+        assert validator._check_semantic_preservation(elaborated, baseline).passed
+
+    def test_without_and_no_determiner_reverse_the_directive(self, validator):
+        baseline = "Always inspect security vulnerabilities before approving the pull request."
+        skipped = "Approve the pull request without first inspecting security vulnerabilities."
+        result = validator._check_semantic_preservation(skipped, baseline)
+        assert not result.passed
+        assert "negated" in result.message
+
+        baseline = "Run checks before approving the deployment."
+        evolved = "Run no checks before approving the deployment."
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert not result.passed
+        assert "negated" in result.message
+
+    def test_cjk_negated_near_copy_fails(self, validator):
+        baseline = "コードレビューではセキュリティ脆弱性とテスト網羅性を必ず確認すること。"
+        evolved = "コードレビューではセキュリティ脆弱性とテスト網羅性を必ず確認しないこと。"
+        result = validator._check_semantic_preservation(evolved, baseline)
+        assert not result.passed
+        assert "Instruction reversal" in result.message
+
+    def test_validate_all_rejects_negated_skill_body(self, validator):
+        baseline = (
+            "---\nname: review\ndescription: Review changes\n---\n\n"
+            "Always inspect security vulnerabilities and test coverage "
+            "before approving the pull request.\n"
+        )
+        evolved = (
+            "---\nname: review\ndescription: Review changes\n---\n\n"
+            "Never inspect security vulnerabilities and test coverage "
+            "before approving the pull request.\n"
+        )
+        results = {
+            r.constraint_name: r
+            for r in validator.validate_all(evolved, "skill", baseline_text=baseline)
+        }
+        assert results["shrink_limit"].passed is True
+        assert results["semantic_preservation"].passed is False
+        assert "Instruction reversal" in results["semantic_preservation"].message
+
 
 class TestNonEmpty:
     def test_non_empty_passes(self, validator):
