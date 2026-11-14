@@ -98,7 +98,8 @@ def test_evolve_rejects_invalid_metric_before_any_work(tmp_path):
 # ── evolve()-level: fallback accounting and the holdout rule ──────────────
 
 BODY = "Answer the user's question about the repository. Be precise and cite the files you used."
-EVOLVED = BODY + " Always run the tests."
+# Stay within default +20% body growth so constraint validation does not reject the stub evolution.
+EVOLVED = BODY + " Run tests."
 
 
 def _setup_evolve(tmp_path, monkeypatch, judge_script):
@@ -116,7 +117,7 @@ def _setup_evolve(tmp_path, monkeypatch, judge_script):
         (ds / f"{split}.jsonl").write_text("\n".join(__import__("json").dumps(r) for r in rows) + "\n")
 
     def agent(system, user):
-        return xml_fields(plan="p", output="good answer" if "Always run the tests" in (system or "") else "bad answer")
+        return xml_fields(plan="p", output="good answer" if "Run tests" in (system or "") else "bad answer")
 
     real_lm = dspy.LM
 

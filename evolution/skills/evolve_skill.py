@@ -223,8 +223,9 @@ def evolve(
 
     if not all_pass:
         console.print("[red]✗ Evolved skill FAILED constraints — not deploying[/red]")
-        # Still save for inspection
-        output_path = Path("output") / skill_name / "evolved_FAILED.md"
+        # Still save for inspection (timestamped so concurrent runs do not overwrite)
+        stamp = datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+        output_path = config.output_dir / skill_name / f"evolved_FAILED_{stamp}.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(evolved_full)
         console.print(f"  Saved failed variant to {output_path}")

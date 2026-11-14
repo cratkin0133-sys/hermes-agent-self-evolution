@@ -47,6 +47,9 @@ class EvolutionConfig:
     output_dir: Path = field(default_factory=lambda: Path("./output"))
     create_pr: bool = True
 
+    # Appended last so older positional EvolutionConfig(...) call sites stay valid.
+    min_semantic_overlap: float = 0.25  # min significant-word overlap with baseline
+
 
 def _discover_hermes_agent_path() -> Optional[Path]:
     """Best-effort hermes-agent repo discovery that never raises.
