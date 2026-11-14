@@ -6,7 +6,6 @@ considered valid. Failed constraints = immediate rejection.
 
 import re
 import subprocess
-from difflib import SequenceMatcher
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
@@ -16,7 +15,7 @@ from evolution.core.config import EvolutionConfig
 # Latin tokens only — Python's \w also glues unspaced CJK into one giant token.
 _LATIN_WORD_RE = re.compile(r"[a-zA-Z0-9_]{4,}")
 _LATIN_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:'[A-Za-z]+)?|[,;.]")
-_UNIT_SPLIT_RE = re.compile(r"(?:\r?\n|[.!;?。！？]+[ \t]*)")
+_UNIT_SPLIT_RE = re.compile(r"(?:\r?\n|[.!;?\u3002\uff01\uff1f]+[ \t]*)")
 
 # Grammatical negation applies to the next content head, not the whole clause,
 # so "do not skip the inspection" does not look like "do not inspect".
@@ -24,7 +23,14 @@ _ASSERT_NEGATIONS = frozenset({
     "not", "never", "nor", "neither", "dont", "doesnt", "didnt", "wont",
     "wouldnt", "cant", "cannot", "couldnt", "mustnt", "shouldnt", "isnt",
     "arent", "wasnt", "werent", "hasnt", "havent", "hadnt", "avoid", "refrain",
-    "no", "none", "nothing", "nobody", "nowhere",
+    "none", "nothing", "nobody", "nowhere",
+})
+# "no <noun>" as denial after these verbs ("run no checks"), not "no issues".
+_NO_QUANTIFIER_HEADS = frozenset({
+    "run", "runs", "running", "perform", "performs", "performing",
+    "execute", "executes", "executing", "take", "takes", "taking",
+    "give", "gives", "giving", "allow", "allows", "allowing", "make", "makes",
+    "leave", "leaves", "include", "includes", "use", "uses", "do", "does",
 })
 _WITHOUT = "without"
 _RESET_WORDS = frozenset({
@@ -82,20 +88,6 @@ _RELATIONS = {
     "close": ("open", -1),
 }
 _Signed = tuple[str, int, str]  # stem, sign, "word" | "relation"
-
-_CJK_NEG_RE = re.compile(
-    "しないでください|してはいけません|しない|しません|できない|ありません|ではない|"
-    "ません|ない|禁止|不要|不可|不能|没有|沒有|勿|别|別|不"
-)
-_CJK_NEG_RESTORE = {
-    "しないでください": "してください",
-    "してはいけません": "してください",
-    "しない": "する",
-    "しません": "します",
-    "できない": "できる",
-    "ありません": "あります",
-    "ではない": "である",
-}
 
 
 def _is_cjk_char(ch: str) -> bool:
@@ -162,16 +154,30 @@ def _signed_tokens(text: str) -> list[_Signed]:
     pending: Optional[int] = None
     negation_open = False
     tokens: list[_Signed] = []
+    last_content_stem: Optional[str] = None
     normalized = text.replace("\u2019", "'").replace("\u2018", "'")
     for raw in _LATIN_TOKEN_RE.findall(normalized):
-        if raw in ",;.":
+        if raw == ",":
+            if negation_open:
+                pending = -1
+            continue
+        if raw in ".;":
             pending = None
             negation_open = False
+            last_content_stem = None
             continue
         word = raw.lower().replace("'", "")
         if word in _RESET_WORDS:
             pending = None
             negation_open = False
+            continue
+        if word == "no":
+            if (
+                last_content_stem is not None
+                and last_content_stem in _NO_QUANTIFIER_HEADS
+            ):
+                pending = -1
+                negation_open = True
             continue
         if word in _ASSERT_NEGATIONS:
             pending = -1
@@ -182,6 +188,8 @@ def _signed_tokens(text: str) -> list[_Signed]:
             negation_open = False
             continue
         if word in _STOPWORDS or word in _TRANSPARENT or word.isdigit():
+            if negation_open and word in ("and", "or"):
+                pending = -1
             continue
         relation = _relation_for(word)
         sign = 1 if pending is None else pending
@@ -189,8 +197,11 @@ def _signed_tokens(text: str) -> list[_Signed]:
         if relation:
             canon, rel_sign = relation
             tokens.append((canon, sign * rel_sign, "relation"))
+            last_content_stem = canon
         else:
-            tokens.append((_stem(word), sign, "word"))
+            stem = _stem(word)
+            tokens.append((stem, sign, "word"))
+            last_content_stem = stem
     return tokens
 
 
@@ -260,52 +271,28 @@ def _relation_inverted(baseline: list[_Signed], evolved: list[_Signed]) -> bool:
 
 
 def _latin_reversal_reason(baseline: str, evolved: str) -> Optional[str]:
+    evolved_units = _split_units(evolved)
     for base_unit in _split_units(baseline):
         base_tokens = _signed_tokens(base_unit)
         if len(base_tokens) < 2:
             continue
-        for evolved_unit in _split_units(evolved):
+        best_recall = 0.0
+        best_tokens: Optional[list[_Signed]] = None
+        for evolved_unit in evolved_units:
             evolved_tokens = _signed_tokens(evolved_unit)
             recall = _token_recall(base_tokens, evolved_tokens)
-            if recall < 0.75:
-                continue
-            # The leading action, or a near-copy's next content word ("run no checks").
-            if _lead_word_negated(base_tokens, evolved_tokens) or (
-                recall >= 0.9 and _early_content_negated(base_tokens, evolved_tokens)
-            ):
-                return "a baseline directive was negated"
-            if _relation_inverted(base_tokens, evolved_tokens):
-                return "a baseline relation was inverted"
-    return None
-
-
-def _cjk_normalized(text: str) -> tuple[str, int]:
-    count = 0
-
-    def restore(match: re.Match[str]) -> str:
-        nonlocal count
-        count += 1
-        return _CJK_NEG_RESTORE.get(match.group(0), "")
-
-    normalized = _CJK_NEG_RE.sub(restore, text)
-    normalized = re.sub(r"\s+", "", normalized)
-    return normalized, count
-
-
-def _cjk_reversal_reason(baseline: str, evolved: str) -> Optional[str]:
-    """Near-copy CJK sentences that only insert or remove a negation."""
-    for base_unit in _split_units(baseline):
-        if sum(1 for ch in base_unit if _is_cjk_char(ch)) < 8:
+            if recall > best_recall:
+                best_recall = recall
+                best_tokens = evolved_tokens
+        if best_recall < 0.75 or best_tokens is None:
             continue
-        base_norm, base_count = _cjk_normalized(base_unit)
-        if len(base_norm) < 8:
-            continue
-        for evolved_unit in _split_units(evolved):
-            evolved_norm, evolved_count = _cjk_normalized(evolved_unit)
-            if base_count == evolved_count or len(evolved_norm) < 8:
-                continue
-            if SequenceMatcher(None, base_norm, evolved_norm).ratio() >= 0.92:
-                return "a baseline directive was negated"
+        # The leading action, or a near-copy's next content word ("run no checks").
+        if _lead_word_negated(base_tokens, best_tokens) or (
+            best_recall >= 0.9 and _early_content_negated(base_tokens, best_tokens)
+        ):
+            return "a baseline directive was negated"
+        if _relation_inverted(base_tokens, best_tokens):
+            return "a baseline relation was inverted"
     return None
 
 
@@ -315,7 +302,7 @@ def _instruction_reversal(baseline: str, evolved: str) -> Optional[str]:
     Word overlap cannot see this: a contradictory rewrite keeps the same
     vocabulary and only flips negation or a relation such as before/after.
     """
-    return _latin_reversal_reason(baseline, evolved) or _cjk_reversal_reason(baseline, evolved)
+    return _latin_reversal_reason(baseline, evolved)
 
 
 @dataclass
