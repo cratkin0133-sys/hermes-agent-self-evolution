@@ -169,7 +169,8 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
     Returns metric(gold, pred, trace=None, pred_name=None, pred_trace=None)
     -> dspy.Prediction(score=float, feedback=str).
 
-    If the metric's first judge call raises, that is treated as a configuration
+    The first judge call is serialized (concurrent callers wait for it) and
+    retried once. If it still raises, that is treated as a configuration
     error: it raises RuntimeError, keeps raising on every later call, and stores
     the error on ``metric.config_error`` (optimizers such as GEPA swallow metric
     exceptions, so callers should check it). A judge failure after a successful
@@ -201,8 +202,13 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
             if metric.config_error is not None:
                 raise metric.config_error
             if not state["first_completed"]:
+                # One retry absorbs a transient blip (rate limit, dropped
+                # connection) so it is not mistaken for a configuration error.
                 try:
-                    fitness = judge.score(**score_kwargs)
+                    try:
+                        fitness = judge.score(**score_kwargs)
+                    except Exception:
+                        fitness = judge.score(**score_kwargs)
                 except Exception as e:
                     err = RuntimeError(
                         f"LLM judge failed on first call: {type(e).__name__}: {e} "

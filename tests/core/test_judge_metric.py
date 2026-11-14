@@ -173,3 +173,49 @@ def test_evolve_raises_when_first_judge_call_fails(tmp_path, monkeypatch):
     run = _setup_evolve(tmp_path, monkeypatch, lambda s, u: "garbage")
     with pytest.raises(RuntimeError, match="LLM judge failed on first call"):
         run()
+
+
+class _FlakyJudge:
+    """Judge whose first ``fail_first`` score() calls raise, then succeed."""
+
+    def __init__(self, fail_first):
+        import threading
+        self.fail_first = fail_first
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def score(self, **kw):
+        from evolution.core.fitness import FitnessScore
+        with self._lock:
+            self.calls += 1
+            n = self.calls
+        if n <= self.fail_first:
+            raise ConnectionError("transient")
+        return FitnessScore(correctness=1.0, procedure_following=1.0, conciseness=1.0, feedback="ok")
+
+
+def test_transient_first_call_failure_is_retried_once():
+    judge = _FlakyJudge(fail_first=1)
+    metric = make_judge_metric(judge)
+    res = metric(_gold(), dspy.Prediction(output="answer", skill_text="SK"))
+    assert res.score == pytest.approx(1.0)
+    assert metric.config_error is None and metric.fallbacks == 0
+    assert judge.calls == 2
+
+
+def test_first_call_failing_twice_is_a_config_error():
+    judge = _FlakyJudge(fail_first=2)
+    metric = make_judge_metric(judge)
+    with pytest.raises(RuntimeError, match="LLM judge failed on first call"):
+        metric(_gold(), dspy.Prediction(output="answer", skill_text="SK"))
+    assert judge.calls == 2
+
+
+def test_concurrent_calls_with_flaky_first_request_do_not_abort():
+    from concurrent.futures import ThreadPoolExecutor
+    judge = _FlakyJudge(fail_first=1)
+    metric = make_judge_metric(judge)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda i: metric(_gold(), dspy.Prediction(output=f"a{i}", skill_text="SK")), range(16)))
+    assert all(r.score == pytest.approx(1.0) for r in results)
+    assert metric.config_error is None and metric.fallbacks == 0
