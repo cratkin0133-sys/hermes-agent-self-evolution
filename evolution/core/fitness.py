@@ -57,8 +57,9 @@ class LLMJudge:
         conciseness: float = dspy.OutputField(desc="Score 0.0-1.0: Appropriately concise?")
         feedback: str = dspy.OutputField(desc="Specific, actionable feedback on what could be improved")
 
-    def __init__(self, config: EvolutionConfig):
+    def __init__(self, config: EvolutionConfig, lm: Optional[dspy.LM] = None):
         self.config = config
+        self.lm = lm
         self.judge = dspy.ChainOfThought(self.JudgeSignature)
 
     def score(
@@ -72,7 +73,7 @@ class LLMJudge:
     ) -> FitnessScore:
         """Score an agent output using LLM-as-judge."""
 
-        lm = dspy.LM(self.config.eval_model)
+        lm = self.lm if self.lm is not None else dspy.LM(self.config.eval_model)
 
         with dspy.context(lm=lm):
             result = self.judge(
@@ -158,6 +159,41 @@ def skill_gepa_metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -
     else:
         feedback = f"Score {score:.2f}. The response covered the expected behavior: {expected!r}."
     return dspy.Prediction(score=score, feedback=feedback)
+
+
+def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
+    """GEPA-compatible metric backed by LLMJudge.
+
+    Returns metric(gold, pred, trace=None, pred_name=None, pred_trace=None)
+    -> dspy.Prediction(score=float, feedback=str).
+    """
+
+    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -> dspy.Prediction:
+        agent_output = getattr(pred, "output", "") or ""
+        if not agent_output.strip():
+            return dspy.Prediction(
+                score=0.0,
+                feedback="The response was empty. The skill must lead to a concrete answer.",
+            )
+        skill_text = getattr(pred, "skill_text", "") or ""
+        try:
+            fitness = judge.score(
+                task_input=gold.task_input,
+                expected_behavior=gold.expected_behavior,
+                agent_output=agent_output,
+                skill_text=skill_text,
+                artifact_size=len(skill_text) if max_size else None,
+                max_size=max_size,
+            )
+        except Exception as e:
+            fallback = skill_gepa_metric(gold, pred)
+            return dspy.Prediction(
+                score=fallback.score,
+                feedback=f"[judge unavailable: {type(e).__name__}] {fallback.feedback}",
+            )
+        return dspy.Prediction(score=fitness.composite, feedback=fitness.feedback)
+
+    return metric
 
 
 def _parse_score(value) -> float:
