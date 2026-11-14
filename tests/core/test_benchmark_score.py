@@ -133,3 +133,15 @@ def test_regression_epsilon(tmp_path):
     # 0.7 >= 0.8 - 0.1 is False in raw floating point; the epsilon makes it pass.
     cmd2 = f'{sys.executable} -c "import m; print(\'SCORE=\' + (\'0.8\' if m.X == 8 else \'0.7\'))"'
     assert compare_benchmark(r, {"m.py": "X = 9\n"}, cmd2, max_regression=0.1).passed
+
+
+@pytest.mark.parametrize("noise", ["3 failed attempts", "failed to connect", "upload failed", "1 passed the check"])
+def test_non_summary_lines_after_real_summary_are_skipped(noise):
+    assert parse_score(f"===== 8 passed, 2 failed in 1.2s =====\n{noise}\n") == pytest.approx(0.8)
+
+
+def test_pytest_summary_variants():
+    assert parse_score("== 3 passed, 1 skipped, 2 warnings in 61.02s (0:01:01) ==") == pytest.approx(1.0)
+    assert parse_score("2 failed, 6 passed, 1 deselected, 1 xfailed in 0.40s") == pytest.approx(0.75)
+    assert parse_score("3 failed attempts") is None
+    assert parse_score("1 skipped in 0.1s") is None
