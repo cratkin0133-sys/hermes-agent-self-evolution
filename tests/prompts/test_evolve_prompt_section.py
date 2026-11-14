@@ -123,3 +123,30 @@ def test_discovery_and_platform_assembly(repo):
     cand = {k: v.value for k, v in found.items()}
     sp = assemble_system_prompt(cand, "PLATFORM_HINTS[cli]")
     assert "no markdown" in sp and "Telegram" not in sp
+
+
+def test_phase3_benchmark_not_run_when_cheaper_gates_reject(repo, tmp_path, monkeypatch):
+    marker = tmp_path / "bench_ran"
+    cmd = shlex.join([sys.executable, "-c", f"import pathlib; pathlib.Path({str(marker)!r}).write_text('x'); print('SCORE=1')"])
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=cmd, min_improvement=5.0)
+    assert not m["accepted"]
+    assert any(r.startswith("improvement") for r in m["rejection_reasons"])
+    assert not marker.exists()
+    assert m["benchmark"] is None
+
+
+def test_phase3_benchmark_timeout_rejects(repo, tmp_path, monkeypatch):
+    cmd = shlex.join([sys.executable, "-c", "import time; time.sleep(30)"])
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=cmd, benchmark_timeout=1)
+    assert not m["accepted"]
+    assert "benchmark gate failed" in m["rejection_reasons"]
+    assert m["benchmark"]["message"].startswith("inconclusive:")
+
+
+def test_phase3_cli_accepts_benchmark_timeout(monkeypatch):
+    from click.testing import CliRunner
+    seen = {}
+    monkeypatch.setattr(eps, "evolve_prompt_sections", lambda **kw: seen.update(kw))
+    res = CliRunner().invoke(eps.main, ["--benchmark-cmd", "x", "--benchmark-timeout", "7"])
+    assert res.exit_code == 0, res.output
+    assert seen["benchmark_timeout"] == 7
