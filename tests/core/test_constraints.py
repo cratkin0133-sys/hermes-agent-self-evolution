@@ -43,6 +43,13 @@ class TestGrowthConstraints:
         result = validator._check_growth(evolved, baseline, "skill")
         assert not result.passed
 
+    def test_repair_from_empty_baseline_skips_growth_cap(self, validator):
+        baseline = "   \n"
+        evolved = "x" * 500
+        result = validator._check_growth(evolved, baseline, "skill")
+        assert result.passed
+        assert "skipped" in result.message
+
     def test_moderate_shrinkage_is_ok(self, validator):
         baseline = "x" * 1000
         evolved = "x" * 800  # 20% smaller — within min_size_ratio
@@ -56,6 +63,19 @@ class TestGrowthConstraints:
         result = validator._check_shrink(evolved, baseline)
         assert not result.passed
         assert "Shrank to" in result.message
+
+
+class TestSkillBodyExtraction:
+    def test_thematic_break_in_body_is_preserved(self, validator):
+        """Markdown --- in the body must not truncate comparison text."""
+        skill = (
+            "---\nname: x\ndescription: y\n---\n\n"
+            "# Section A\n\ncontent alpha\n\n---\n\n# Section B\n\ncontent beta\n"
+        )
+        body = validator._skill_markdown_body(skill)
+        assert "content alpha" in body
+        assert "content beta" in body
+        assert body.count("---") >= 1
 
 
 class TestSemanticPreservation:
@@ -74,6 +94,12 @@ class TestSemanticPreservation:
         result = validator._check_semantic_preservation(evolved, baseline)
         assert not result.passed
         assert "Semantic drift" in result.message
+
+    def test_non_latin_baseline_uses_character_overlap(self, validator):
+        baseline = "コードレビュー手順を厳密に記述すること"
+        unrelated = "完全に無関係な別の短い指示文です"
+        result = validator._check_semantic_preservation(unrelated, baseline)
+        assert not result.passed
 
 
 class TestNonEmpty:
@@ -156,6 +182,19 @@ class TestValidateAll:
         assert results["non_empty"].passed is True  # tiny body is non-empty
         assert results["shrink_limit"].passed is False
         assert results["semantic_preservation"].passed is False
+
+    def test_bloated_frontmatter_cannot_mask_body_shrink(self, validator):
+        """Body-only comparison must fail even when YAML padding dominates file size."""
+        yaml_pad = "meta: " + ("padding " * 400) + "\n"
+        front = f"---\nname: requesting-code-review\ndescription: x\n{yaml_pad}---\n\n"
+        baseline = front + ("step\n" * 200)
+        collapsed = front + "be brief\n"
+        results = {
+            r.constraint_name: r.passed
+            for r in validator.validate_all(collapsed, "skill", baseline_text=baseline)
+        }
+        assert results["shrink_limit"] is False
+        assert results["semantic_preservation"] is False
 
 
 def test_reassembled_skill_passes_structure_check():

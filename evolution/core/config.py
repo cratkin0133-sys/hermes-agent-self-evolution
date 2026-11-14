@@ -31,7 +31,6 @@ class EvolutionConfig:
     max_param_desc_size: int = 200  # chars
     max_prompt_growth: float = 0.2  # 20% max growth over baseline
     min_size_ratio: float = 0.5  # evolved text must keep >= 50% of baseline size
-    min_semantic_overlap: float = 0.25  # min significant-word overlap with baseline
 
     # Eval dataset
     eval_dataset_size: int = 20  # Total examples to generate
@@ -47,6 +46,9 @@ class EvolutionConfig:
     # Output
     output_dir: Path = field(default_factory=lambda: Path("./output"))
     create_pr: bool = True
+
+    # Appended last so older positional EvolutionConfig(...) call sites stay valid.
+    min_semantic_overlap: float = 0.25  # min significant-word overlap with baseline
 
 
 def _discover_hermes_agent_path() -> Optional[Path]:

@@ -12,7 +12,7 @@ from typing import Optional
 
 from evolution.core.config import EvolutionConfig
 
-_WORD_RE = re.compile(r"[a-zA-Z0-9_]{4,}")
+_WORD_RE = re.compile(r"\w{4,}", re.UNICODE)
 
 
 @dataclass
@@ -134,6 +134,13 @@ class ConstraintValidator:
             )
 
     def _check_growth(self, text: str, baseline: str, artifact_type: str) -> ConstraintResult:
+        if not baseline.strip():
+            return ConstraintResult(
+                passed=True,
+                constraint_name="growth_limit",
+                message="Baseline empty — growth limit skipped (repair from empty body)",
+            )
+
         growth = (len(text) - len(baseline)) / max(1, len(baseline))
         max_growth = self.config.max_prompt_growth
 
@@ -164,6 +171,13 @@ class ConstraintValidator:
 
     def _check_shrink(self, text: str, baseline: str) -> ConstraintResult:
         """Guard against an optimizer gutting the artifact to game the metric."""
+        if not baseline.strip():
+            return ConstraintResult(
+                passed=True,
+                constraint_name="shrink_limit",
+                message="Baseline empty — shrink limit skipped (repair from empty body)",
+            )
+
         ratio = len(text) / max(1, len(baseline))
         floor = self.config.min_size_ratio
         if ratio >= floor:
@@ -181,48 +195,72 @@ class ConstraintValidator:
     def _check_semantic_preservation(self, text: str, baseline: str) -> ConstraintResult:
         """Reject variants that drift away from the baseline's significant terms.
 
-        Uses significant-word recall (words of length ≥ 4) against the baseline.
-        Catches catastrophic rewrites and near-empty collapses that still have
-        a few leftover tokens — the README's semantic-preservation guardrail.
+        Heuristic word-overlap recall — does not detect negated or contradictory
+        rewrites that reuse the same vocabulary. See PLAN.md for full LLM-based
+        semantic checks in a future iteration.
         """
-        baseline_words = set(_WORD_RE.findall(baseline.lower()))
-        if not baseline_words:
+        if not baseline.strip():
             return ConstraintResult(
                 passed=True,
                 constraint_name="semantic_preservation",
-                message="No significant baseline terms to compare",
+                message="Baseline empty — semantic check skipped",
+            )
+        if not text.strip():
+            return ConstraintResult(
+                passed=False,
+                constraint_name="semantic_preservation",
+                message="Evolved text empty while baseline has content",
             )
 
+        baseline_words = set(_WORD_RE.findall(baseline.lower()))
         evolved_words = set(_WORD_RE.findall(text.lower()))
-        overlap = len(baseline_words & evolved_words) / len(baseline_words)
         minimum = self.config.min_semantic_overlap
+
+        if baseline_words:
+            overlap = len(baseline_words & evolved_words) / len(baseline_words)
+            metric = "term"
+        else:
+            baseline_chars = {c for c in baseline.lower() if c.isalnum()}
+            evolved_chars = {c for c in text.lower() if c.isalnum()}
+            if not baseline_chars:
+                return ConstraintResult(
+                    passed=False,
+                    constraint_name="semantic_preservation",
+                    message="Baseline has no comparable alphanumeric content",
+                )
+            overlap = len(baseline_chars & evolved_chars) / len(baseline_chars)
+            metric = "character"
 
         if overlap >= minimum:
             return ConstraintResult(
                 passed=True,
                 constraint_name="semantic_preservation",
-                message=f"Semantic overlap OK: {overlap:.1%} (min {minimum:.1%})",
+                message=f"Semantic overlap OK ({metric}): {overlap:.1%} (min {minimum:.1%})",
             )
         return ConstraintResult(
             passed=False,
             constraint_name="semantic_preservation",
             message=(
-                f"Semantic drift: overlap {overlap:.1%} below minimum {minimum:.1%} "
-                f"({len(baseline_words & evolved_words)}/{len(baseline_words)} terms retained)"
+                f"Semantic drift ({metric}): overlap {overlap:.1%} below minimum {minimum:.1%}"
             ),
         )
+
+    @staticmethod
+    def _skill_markdown_body(text: str) -> str:
+        """Return skill markdown body after a line-bounded YAML frontmatter block."""
+        lines = text.strip().splitlines()
+        if not lines or lines[0].strip() != "---":
+            return text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                return "\n".join(lines[i + 1 :])
+        return text
 
     def _non_empty_text(self, text: str, artifact_type: str) -> str:
         """Markdown body for skills; the original text for other artifacts."""
         if artifact_type != "skill":
             return text
-        stripped = text.strip()
-        if not stripped.startswith("---"):
-            return text
-        parts = stripped.split("---", 2)
-        if len(parts) < 3:
-            return text
-        return parts[2]
+        return self._skill_markdown_body(text)
 
     def _comparison_text(self, text: str, artifact_type: str) -> str:
         """Text used for size-delta and semantic checks against a baseline."""
