@@ -26,6 +26,14 @@ class BenchmarkComparison:
     message: str
 
 
+def benchmark_metrics(bench: Optional[BenchmarkComparison]) -> Optional[dict]:
+    """Metrics-dict form of a comparison (None when no benchmark ran)."""
+    if bench is None:
+        return None
+    return {"passed": bench.passed, "baseline_score": bench.baseline_score,
+            "evolved_score": bench.evolved_score, "message": bench.message}
+
+
 def _run_in_tree(
     hermes_repo: Path,
     files: dict[str, str],

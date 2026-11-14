@@ -1,5 +1,6 @@
 """Phase 5: signals → triage → dispatch → record → cooldown."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,3 +77,29 @@ def test_dispatch_turns_evolver_exit_into_rejected_metrics(repo, monkeypatch):
     monkeypatch.setattr(es, "evolve", boom)
     m = loop.dispatch("skill", "x", repo, False, False, "m", "m", 1)
     assert m["accepted"] is False and "exited" in m["rejection_reasons"][0]
+
+
+def _bench(tmp_path, score, extra=()):
+    from click.testing import CliRunner
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    cmd = f'{sys.executable} -c "print(\'SCORE={score}\')"'
+    return CliRunner().invoke(loop.cli, ["--hermes-repo", str(repo), "--db", str(tmp_path / "m.db"),
+                                         "bench", "--cmd", cmd, "--name", "tb", *extra])
+
+
+def test_bench_records_score_and_flags_regression(tmp_path):
+    first = _bench(tmp_path, 0.9)
+    assert first.exit_code == 0, first.output
+    assert "PASS score=0.9" in first.output and "prev n/a" in first.output
+    second = _bench(tmp_path, 0.5)
+    assert second.exit_code == 1, second.output
+    assert "REGRESSION" in second.output
+    assert MetricsStore(tmp_path / "m.db").last_run("benchmark", "tb")["evolved"] == 0.5
+
+
+def test_bench_small_drop_within_max_regression_passes(tmp_path):
+    assert _bench(tmp_path, 0.9).exit_code == 0
+    r = _bench(tmp_path, 0.89)
+    assert r.exit_code == 0, r.output
+    assert _bench(tmp_path, 0.5, ("--max-regression", "0.5")).exit_code == 0

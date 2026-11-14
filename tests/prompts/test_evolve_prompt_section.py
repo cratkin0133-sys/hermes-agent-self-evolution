@@ -2,6 +2,8 @@
 
 import json
 import re
+import shlex
+import sys
 
 import pytest
 
@@ -62,13 +64,13 @@ def _route(reflector):
     return lambda model, **kw: fake_lm(reflector if "reflect" in model else judge if "judge" in model else agent, model)
 
 
-def _run(repo, tmp_path, monkeypatch, reflector):
+def _run(repo, tmp_path, monkeypatch, reflector, **kw):
     monkeypatch.setattr(eps, "make_lm", _route(reflector))
     monkeypatch.setattr(mc, "make_lm", _route(reflector))
     return eps.evolve_prompt_sections(
         sections=["SESSION_SEARCH_GUIDANCE"], iterations=3, dataset_path=str(repo / "golden.jsonl"),
         optimizer_model="openai/fake-reflect", eval_model="openai/fake-agent", judge_model="openai/fake-judge",
-        hermes_repo=str(repo), output_root=tmp_path / "out",
+        hermes_repo=str(repo), output_root=tmp_path / "out", **kw,
     )
 
 
@@ -87,6 +89,32 @@ def test_phase3_rejects_gutted_section_even_if_score_rises(repo, tmp_path, monke
     m = _run(repo, tmp_path, monkeypatch, reflector_gutting)
     assert not m["accepted"]
     assert any("shrink_limit" in f or "growth_limit" in f for f in m["constraint_failures"]), m
+
+
+def _bench_cmd(evolved_score, base_score):
+    code = ("import pathlib; t=pathlib.Path('agent/prompt_builder.py').read_text(); "
+            f"print('SCORE={evolved_score}' if 'search first' in t else 'SCORE={base_score}')")
+    return shlex.join([sys.executable, "-c", code])
+
+
+def test_phase3_benchmark_score_drop_rejects(repo, tmp_path, monkeypatch):
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=_bench_cmd(0.5, 0.9))
+    assert not m["accepted"]
+    assert "benchmark gate failed" in m["rejection_reasons"]
+    assert m["benchmark"]["passed"] is False
+    assert (m["benchmark"]["baseline_score"], m["benchmark"]["evolved_score"]) == (0.9, 0.5)
+
+
+def test_phase3_benchmark_equal_scores_accepts(repo, tmp_path, monkeypatch):
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=_bench_cmd(0.7, 0.7))
+    assert m["accepted"], m
+    assert m["benchmark"]["passed"] is True and m["benchmark"]["evolved_score"] == 0.7
+
+
+def test_phase3_benchmark_regression_tolerance_is_configurable(repo, tmp_path, monkeypatch):
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=_bench_cmd(0.69, 0.7),
+             benchmark_max_regression=0.05)
+    assert m["accepted"], m
 
 
 def test_discovery_and_platform_assembly(repo):
