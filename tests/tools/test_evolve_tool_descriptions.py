@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 
 import pytest
 
@@ -62,6 +63,44 @@ def test_phase2_evolves_descriptions_and_passes_gates(fake_repo, tmp_path, monke
     exec(evolved_src, ns)
     assert "instead of cat" in ns["READ_SCHEMA"]["description"]
     assert ns["TERM_SCHEMA"]["description"].startswith("Run any shell command")
+
+
+def _run_with_bench(fake_repo, tmp_path, monkeypatch, evolved_score, base_score, **kw):
+    repo, ds = fake_repo
+    route = lambda model, **k: fake_lm(reflector if "reflect" in model else selector, model)
+    monkeypatch.setattr(etd, "make_lm", route)
+    monkeypatch.setattr(mc, "make_lm", route)
+    code = ("import pathlib; t=pathlib.Path('tools/file_tools.py').read_text(); "
+            f"print('SCORE={evolved_score}' if 'instead of cat' in t else 'SCORE={base_score}')")
+    return etd.evolve_tool_descriptions(
+        iterations=4, dataset_path=str(ds), optimizer_model="openai/fake-reflect",
+        eval_model="openai/fake-select", hermes_repo=str(repo), output_root=tmp_path / "out",
+        benchmark_cmd=f'{sys.executable} -c "{code}"', **kw,
+    )
+
+
+def test_phase2_benchmark_score_drop_rejects(fake_repo, tmp_path, monkeypatch):
+    m = _run_with_bench(fake_repo, tmp_path, monkeypatch, 0.5, 0.9)
+    assert not m["accepted"]
+    assert m["rejection_reasons"] == ["benchmark gate failed"]
+    assert m["benchmark"]["passed"] is False
+    assert (m["benchmark"]["baseline_score"], m["benchmark"]["evolved_score"]) == (0.9, 0.5)
+
+
+def test_phase2_benchmark_within_default_tolerance_accepts(fake_repo, tmp_path, monkeypatch):
+    m = _run_with_bench(fake_repo, tmp_path, monkeypatch, 0.89, 0.9)
+    assert m["accepted"], m
+    assert m["benchmark"]["passed"] is True
+
+
+def test_phase2_without_benchmark_cmd_has_no_benchmark_metric(fake_repo, tmp_path, monkeypatch):
+    repo, ds = fake_repo
+    route = lambda model, **k: fake_lm(reflector if "reflect" in model else selector, model)
+    monkeypatch.setattr(etd, "make_lm", route)
+    monkeypatch.setattr(mc, "make_lm", route)
+    m = etd.evolve_tool_descriptions(iterations=4, dataset_path=str(ds), optimizer_model="openai/fake-reflect",
+                                     eval_model="openai/fake-select", hermes_repo=str(repo), output_root=tmp_path / "out")
+    assert m["accepted"] and m["benchmark"] is None
 
 
 def test_normalize_choice_prefers_exact_and_longest():

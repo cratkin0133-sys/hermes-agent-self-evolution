@@ -21,6 +21,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from evolution.core.benchmark_score import parse_score
 from evolution.core.config import resolve_hermes_agent_path
 from evolution.monitor.signals import compute_signals, load_messages, skill_names
 from evolution.monitor.store import MetricsStore
@@ -148,16 +149,26 @@ def run_loop(repo, store, max_targets=1, phases=("skill", "tool"), min_uses=3, c
 @click.option("--cmd", "command", required=True, help="Benchmark command run in the hermes-agent repo")
 @click.option("--name", default="benchmark")
 @click.option("--timeout", default=7200)
+@click.option("--max-regression", default=0.02, type=float, help="Fail if the score drops more than this vs the previous run")
 @click.pass_context
-def bench_cmd(ctx, command, name, timeout):
-    """Run a benchmark/test command and record pass/fail for trend tracking."""
+def bench_cmd(ctx, command, name, timeout, max_regression):
+    """Run a benchmark/test command, record pass/fail and score, and flag score regressions."""
+    store = ctx.obj["store"]
+    prev_row = store.previous_scored_run("benchmark", name)
+    prev = prev_row["evolved"] if prev_row else None
+    score = None
     try:
         p = subprocess.run(shlex.split(command), cwd=ctx.obj["repo"], capture_output=True, text=True, timeout=timeout)
-        ok, tail = p.returncode == 0, (p.stdout + p.stderr)[-2000:]
+        output = p.stdout + "\n" + p.stderr
+        ok, tail, score = p.returncode == 0, output[-2000:], parse_score(output)
     except subprocess.TimeoutExpired:
         ok, tail = False, f"timeout after {timeout}s"
-    ctx.obj["store"].record_run("benchmark", name, {"accepted": ok, "command": command, "output_tail": tail})
-    console.print(f"{name}: {'PASS' if ok else 'FAIL'}")
+    store.record_run("benchmark", name, {"accepted": ok, "command": command, "output_tail": tail, "evolved_score": score})
+    fmt = lambda v: "n/a" if v is None else f"{v:g}"
+    console.print(f"{name}: {'PASS' if ok else 'FAIL'} score={fmt(score)} (prev {fmt(prev)})")
+    if ok and score is not None and prev is not None and score < prev - max_regression:
+        console.print(f"REGRESSION {prev:g} \u2192 {score:g}")
+        ok = False
     sys.exit(0 if ok else 1)
 
 

@@ -22,7 +22,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from evolution.core.benchmark_gate import run_with_changes
+from evolution.core.benchmark_gate import benchmark_metrics, compare_benchmark
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.lm import make_lm
@@ -46,6 +46,7 @@ def evolve_prompt_sections(
     judge_model: Optional[str] = None,
     must_keep: Optional[list[str]] = None,
     benchmark_cmd: Optional[str] = None,
+    benchmark_max_regression: float = 0.0,
     hermes_repo: Optional[str] = None,
     output_root: Path = Path("output"),
     create_pr_branch: bool = False,
@@ -126,7 +127,8 @@ def evolve_prompt_sections(
     bench = None
     if benchmark_cmd and changes and not failures:
         console.print(f"\n  Running benchmark gate: {benchmark_cmd}")
-        bench = run_with_changes(repo, {k: v[1] for k, v in changes.items()}, benchmark_cmd)
+        bench = compare_benchmark(repo, {k: v[1] for k, v in changes.items()}, benchmark_cmd,
+                                  max_regression=benchmark_max_regression)
         console.print(f"  [{'green' if bench.passed else 'red'}]{bench.message}[/]")
 
     reasons = []
@@ -147,7 +149,7 @@ def evolve_prompt_sections(
         "phase": "prompt_sections", "accepted": accepted, "rejection_reasons": reasons,
         "baseline_score": overall_b, "evolved_score": overall_e, "improvement": overall_e - overall_b,
         "changed_sections": changed, "per_section_baseline": base_sec, "per_section_evolved": evo_sec,
-        "constraint_failures": failures, "benchmark": bench.message if bench else None,
+        "constraint_failures": failures, "benchmark": benchmark_metrics(bench),
         "holdout_examples": len(holdout), "elapsed_seconds": round(elapsed, 1),
         "optimizer_model": optimizer_model, "eval_model": eval_model,
     }
@@ -180,20 +182,22 @@ def evolve_prompt_sections(
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model that plays the agent")
 @click.option("--judge-model", default=None, help="Model that scores behaviour (default: optimizer model)")
 @click.option("--must-keep", default=None, help="Comma-separated phrases that must survive evolution")
-@click.option("--benchmark-cmd", default=None, help="Command run in a hermes-agent worktree with the change; must exit 0")
+@click.option("--benchmark-cmd", default=None, help="Command run in a hermes-agent worktree with the change; must exit 0 and print SCORE=<n>")
+@click.option("--benchmark-max-regression", default=0.0, type=float, help="Max allowed benchmark score drop vs baseline")
 @click.option("--min-improvement", default=0.0, type=float)
 @click.option("--max-growth", default=0.2, type=float, help="Max per-section growth (PLAN default 0.2 = +20%)")
 @click.option("--hermes-repo", default=None)
 @click.option("--create-branch", "create_pr_branch", is_flag=True)
 @click.option("--dry-run", is_flag=True)
 def main(sections, iterations, dataset_path, per_section, optimizer_model, eval_model, judge_model,
-         must_keep, benchmark_cmd, min_improvement, max_growth, hermes_repo, create_pr_branch, dry_run):
+         must_keep, benchmark_cmd, benchmark_max_regression, min_improvement, max_growth, hermes_repo, create_pr_branch, dry_run):
     """Evolve system-prompt sections with GEPA under strict behavioural gates."""
     evolve_prompt_sections(
         sections=list(sections) or None, iterations=iterations, dataset_path=dataset_path,
         per_section=per_section, optimizer_model=optimizer_model, eval_model=eval_model,
         judge_model=judge_model, must_keep=must_keep.split(",") if must_keep else None,
-        benchmark_cmd=benchmark_cmd, min_improvement=min_improvement, max_growth=max_growth, hermes_repo=hermes_repo,
+        benchmark_cmd=benchmark_cmd, benchmark_max_regression=benchmark_max_regression,
+        min_improvement=min_improvement, max_growth=max_growth, hermes_repo=hermes_repo,
         create_pr_branch=create_pr_branch, dry_run=dry_run,
     )
 

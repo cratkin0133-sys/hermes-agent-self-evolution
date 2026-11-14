@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from evolution.core.benchmark_gate import benchmark_metrics, compare_benchmark
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.lm import make_lm
@@ -44,6 +45,8 @@ def evolve_tool_descriptions(
     output_root: Path = Path("output"),
     create_pr_branch: bool = False,
     regression_tolerance: float = 0.0,
+    benchmark_cmd: Optional[str] = None,
+    benchmark_max_regression: float = 0.02,
     dry_run: bool = False,
 ) -> dict:
     repo = resolve_hermes_agent_path(hermes_repo)
@@ -118,17 +121,25 @@ def evolve_tool_descriptions(
     table.add_row("[bold]overall[/bold]", f"{overall_b:.3f}", f"{overall_e:.3f}", "")
     console.print(table)
 
-    accepted = bool(changed) and constraint_ok and not regressions and overall_e > overall_b
+    changes = literal_changes(repo, found, evolved_partial)
+    bench = None
+    if benchmark_cmd and changes and constraint_ok:
+        console.print(f"\n  Running benchmark gate: {benchmark_cmd}")
+        bench = compare_benchmark(repo, {k: v[1] for k, v in changes.items()}, benchmark_cmd,
+                                  max_regression=benchmark_max_regression)
+        console.print(f"  [{'green' if bench.passed else 'red'}]{bench.message}[/]")
+    bench_ok = bench is None or bench.passed
+
+    accepted = bool(changed) and constraint_ok and not regressions and overall_e > overall_b and bench_ok
     out_dir = output_root / "tools" / datetime.now().strftime("%Y%m%d_%H%M%S")
     metrics = {
         "phase": "tool_descriptions", "accepted": accepted, "baseline_accuracy": overall_b,
         "evolved_accuracy": overall_e, "improvement": overall_e - overall_b, "changed_tools": sorted(changed),
-        "regressions": regressions, "per_tool_baseline": base_acc, "per_tool_evolved": evo_acc,
+        "regressions": regressions,
+        "benchmark": benchmark_metrics(bench), "per_tool_baseline": base_acc, "per_tool_evolved": evo_acc,
         "holdout_examples": len(holdout), "elapsed_seconds": round(elapsed, 1),
         "optimizer_model": optimizer_model, "eval_model": eval_model,
     }
-
-    changes = literal_changes(repo, found, evolved_partial)
 
     write_review_bundle(
         out_dir, "Evolve tool descriptions",
@@ -140,7 +151,8 @@ def evolve_tool_descriptions(
 
     if not accepted:
         reason = ("no description changed" if not changed else "constraint failure" if not constraint_ok
-                  else f"per-tool regression: {regressions}" if regressions else "no holdout improvement")
+                  else f"per-tool regression: {regressions}" if regressions
+                  else "benchmark gate failed" if not bench_ok else "no holdout improvement")
         console.print(f"[yellow]⚠ Not accepted: {reason}[/yellow]")
     else:
         console.print(f"[bold green]✓ Accepted: accuracy {overall_e - overall_b:+.3f}[/bold green]")
@@ -149,6 +161,7 @@ def evolve_tool_descriptions(
             wt = create_branch(repo, branch, {k: v[1] for k, v in changes.items()},
                                "Evolve tool descriptions via GEPA", out_dir / "worktree")
             console.print(f"  Branch {branch} committed in {wt}" if wt else "  [yellow]hermes repo is not git; no branch[/yellow]")
+    metrics["rejection_reasons"] = [] if accepted else [reason]
     metrics["output_dir"] = str(out_dir)
     return metrics
 
@@ -162,13 +175,17 @@ def evolve_tool_descriptions(
 @click.option("--eval-model", default="openai/gpt-4.1-mini")
 @click.option("--hermes-repo", default=None)
 @click.option("--create-branch", "create_pr_branch", is_flag=True, help="Commit accepted result on a branch in a hermes-agent worktree")
+@click.option("--benchmark-cmd", default=None, help="Command run in a hermes-agent worktree with the change; must exit 0 and print SCORE=<n>")
+@click.option("--benchmark-max-regression", default=0.02, type=float, help="Max allowed benchmark score drop vs baseline")
 @click.option("--dry-run", is_flag=True)
-def main(tools, iterations, dataset_path, per_tool, optimizer_model, eval_model, hermes_repo, create_pr_branch, dry_run):
+def main(tools, iterations, dataset_path, per_tool, optimizer_model, eval_model, hermes_repo, create_pr_branch,
+         benchmark_cmd, benchmark_max_regression, dry_run):
     """Evolve tool descriptions with GEPA, gated on per-tool selection accuracy."""
     evolve_tool_descriptions(
         tools=tools.split(",") if tools else None, iterations=iterations, dataset_path=dataset_path,
         per_tool=per_tool, optimizer_model=optimizer_model, eval_model=eval_model,
-        hermes_repo=hermes_repo, create_pr_branch=create_pr_branch, dry_run=dry_run,
+        hermes_repo=hermes_repo, create_pr_branch=create_pr_branch, benchmark_cmd=benchmark_cmd,
+        benchmark_max_regression=benchmark_max_regression, dry_run=dry_run,
     )
 
 
