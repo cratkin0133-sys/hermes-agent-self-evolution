@@ -43,8 +43,11 @@ class ConstraintValidator:
         if baseline_text:
             results.append(self._check_growth(artifact_text, baseline_text, artifact_type))
 
-        # 3. Non-empty
-        results.append(self._check_non_empty(artifact_text))
+        # 3. Non-empty. For skills, judge the markdown body: a reassembled
+        # file always starts with YAML frontmatter.
+        results.append(
+            self._check_non_empty(self._non_empty_text(artifact_text, artifact_type))
+        )
 
         # 4. Structural integrity
         if artifact_type == "skill":
@@ -132,6 +135,18 @@ class ConstraintValidator:
                 constraint_name="growth_limit",
                 message=f"Growth exceeded: {growth:+.1%} (max {max_growth:+.1%})",
             )
+
+    def _non_empty_text(self, text: str, artifact_type: str) -> str:
+        """Markdown body for skills; the original text for other artifacts."""
+        if artifact_type != "skill":
+            return text
+        stripped = text.strip()
+        if not stripped.startswith("---"):
+            return text
+        parts = stripped.split("---", 2)
+        if len(parts) < 3:
+            return text
+        return parts[2]
 
     def _check_non_empty(self, text: str) -> ConstraintResult:
         if text.strip():
