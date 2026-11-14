@@ -4,6 +4,8 @@ Uses LLM-as-judge with rubrics to score agent outputs.
 Supports length penalties and multi-dimensional scoring.
 """
 
+import threading
+
 import dspy
 from dataclasses import dataclass
 from typing import Optional
@@ -166,7 +168,16 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
 
     Returns metric(gold, pred, trace=None, pred_name=None, pred_trace=None)
     -> dspy.Prediction(score=float, feedback=str).
+
+    If the metric's first judge call raises, that is treated as a configuration
+    error: it raises RuntimeError, keeps raising on every later call, and stores
+    the error on ``metric.config_error`` (optimizers such as GEPA swallow metric
+    exceptions, so callers should check it). A judge failure after a successful
+    first call falls back to the keyword heuristic and increments
+    ``metric.fallbacks``.
     """
+    lock = threading.Lock()
+    state = {"judge_calls": 0}
 
     def metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -> dspy.Prediction:
         agent_output = getattr(pred, "output", "") or ""
@@ -175,6 +186,11 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
                 score=0.0,
                 feedback="The response was empty. The skill must lead to a concrete answer.",
             )
+        if metric.config_error is not None:
+            raise metric.config_error
+        with lock:
+            first = state["judge_calls"] == 0
+            state["judge_calls"] += 1
         skill_text = getattr(pred, "skill_text", "") or ""
         try:
             fitness = judge.score(
@@ -186,6 +202,15 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
                 max_size=max_size,
             )
         except Exception as e:
+            if first:
+                err = RuntimeError(
+                    f"LLM judge failed on first call: {type(e).__name__}: {e} "
+                    "\u2014 check --judge-model and its API key"
+                )
+                metric.config_error = err
+                raise err from e
+            with lock:
+                metric.fallbacks += 1
             fallback = skill_gepa_metric(gold, pred)
             return dspy.Prediction(
                 score=fallback.score,
@@ -193,6 +218,8 @@ def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
             )
         return dspy.Prediction(score=fitness.composite, feedback=fitness.feedback)
 
+    metric.fallbacks = 0
+    metric.config_error = None
     return metric
 
 

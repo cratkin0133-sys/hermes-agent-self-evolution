@@ -190,6 +190,21 @@ def evolve(
     elapsed = time.time() - start_time
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
 
+    # GEPA turns metric exceptions into failure scores, so surface a broken judge here.
+    if getattr(gepa_metric, "config_error", None) is not None:
+        raise gepa_metric.config_error
+    warned = {"fallback": False}
+
+    def warn_on_fallbacks() -> int:
+        n = getattr(gepa_metric, "fallbacks", 0)
+        if n and not warned["fallback"]:
+            warned["fallback"] = True
+            console.print(f"[yellow]⚠ LLM judge failed {n} time(s); those examples were scored by the "
+                          "keyword heuristic[/yellow]")
+        return n
+
+    fallbacks_before_holdout = warn_on_fallbacks()
+
     # ── 6. Extract evolved skill text ───────────────────────────────────
     # The optimized module's instructions contain the evolved skill text
     evolved_body = optimized_module.skill_text
@@ -239,6 +254,9 @@ def evolve(
             evolved_score = holdout_score(ex, evolved_pred)
             evolved_scores.append(evolved_score)
 
+    judge_fallbacks = warn_on_fallbacks()
+    holdout_fallbacks = judge_fallbacks - fallbacks_before_holdout
+
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
     improvement = avg_evolved - avg_baseline
@@ -280,6 +298,14 @@ def evolve(
     # Save baseline for comparison
     (output_dir / "baseline_skill.md").write_text(skill["raw"])
 
+    reasons = []
+    if evolved_full == skill["raw"]:
+        reasons.append("skill unchanged")
+    if improvement <= 0:
+        reasons.append("no holdout improvement")
+    if holdout_fallbacks:
+        reasons.append("judge fallback during holdout scoring")
+
     # Save metrics
     metrics = {
         "skill_name": skill_name,
@@ -289,6 +315,7 @@ def evolve(
         "eval_model": eval_model,
         "metric": metric,
         "judge_model": (judge_model or optimizer_model) if metric == "judge" else None,
+        "judge_fallbacks": judge_fallbacks,
         "baseline_score": avg_baseline,
         "evolved_score": avg_evolved,
         "improvement": improvement,
@@ -300,12 +327,16 @@ def evolve(
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
         "phase": "skill",
-        "accepted": all_pass and improvement > 0 and evolved_full != skill["raw"],
+        "accepted": all_pass and not reasons,
+        "rejection_reasons": reasons,
     }
     accepted = metrics["accepted"]
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
     console.print(f"\n  Output saved to {output_dir}/")
+    if holdout_fallbacks:
+        console.print(f"\n[yellow]⚠ Not accepted: judge fallback during holdout scoring "
+                      f"({holdout_fallbacks} example(s))[/yellow]")
     if improvement > 0:
         console.print(f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]")
         console.print(f"  Review the diff: diff {output_dir}/baseline_skill.md {output_dir}/evolved_skill.md")
