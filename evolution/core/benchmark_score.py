@@ -31,12 +31,18 @@ def parse_score(output: str) -> Optional[float]:
                 return float(score)
 
     for line in reversed(lines):
-        if "passed" in line or "failed" in line:
-            def count(pattern: str) -> int:
-                m = re.search(pattern, line)
-                return int(m.group(1)) if m else 0
+        if not (
+            re.search(r"\d+ passed", line)
+            or re.search(r"\d+ failed(?:,|\s+in\b|\s*=|$)", line)
+        ):
+            continue
 
-            passed = count(r"(\d+) passed")
-            total = passed + count(r"(\d+) failed") + count(r"(\d+) errors?")
-            return passed / total if total > 0 else None
+        def count(pattern: str) -> int:
+            m = re.search(pattern, line)
+            return int(m.group(1)) if m else 0
+
+        passed = count(r"(\d+) passed")
+        total = passed + count(r"(\d+) failed") + count(r"(\d+) errors?")
+        if total > 0:
+            return passed / total
     return None
