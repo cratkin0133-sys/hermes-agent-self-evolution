@@ -19,6 +19,8 @@ def _qualname_defs(tree: ast.AST) -> dict[str, ast.AST]:
                 if not isinstance(child, ast.ClassDef):
                     out[name] = child
                 walk(child, name + ".")
+            else:
+                walk(child, prefix)
     walk(tree)
     return out
 

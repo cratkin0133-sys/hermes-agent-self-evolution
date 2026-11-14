@@ -23,7 +23,7 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
 from evolution.core.constraints import ConstraintValidator
 from evolution.core.lm import make_lm
-from evolution.core.multi_component import evaluate_candidate, mean, optimize_components, split
+from evolution.core.multi_component import Rollout, evaluate_candidate, mean, optimize_components, split
 from evolution.core.pr_builder import create_branch, write_review_bundle
 from evolution.core.source_patch import literal_changes
 from evolution.tools.tool_descriptions import (
@@ -51,11 +51,13 @@ def evolve_tool_descriptions(
     console.print("\n[bold cyan]🧬 Phase 2[/bold cyan] — Evolving tool descriptions\n")
 
     found, skipped = discover_tool_descriptions(repo, tools)
+    all_found, _ = discover_tool_descriptions(repo)
     for name, why in sorted(skipped.items()):
         console.print(f"  [yellow]skip[/yellow] {escape(name)}: {why}")
     if not found:
         console.print("[red]✗ No evolvable tool descriptions found[/red]")
         sys.exit(1)
+    catalog_baseline = {n: lit.value for n, lit in all_found.items()}
     baseline = {n: lit.value for n, lit in found.items()}
     console.print(f"  Evolving {len(baseline)} descriptions: {', '.join(sorted(baseline))}")
     if dry_run:
@@ -74,19 +76,23 @@ def evolve_tool_descriptions(
     train, val, holdout = split(tasks)
     console.print(f"  Split: {len(train)} train / {len(val)} val / {len(holdout)} holdout")
 
-    limits = {n: max(config.max_tool_desc_size, len(v)) for n, v in baseline.items()}
+    limits = {n: max(config.max_tool_desc_size, len(v)) for n, v in catalog_baseline.items()}
     run = make_selection_run(selector, limits)
 
+    def run_full_catalog(candidate: dict[str, str], ex: ToolTask) -> Rollout:
+        return run({**catalog_baseline, **candidate}, ex)
+
     start = time.time()
-    evolved = optimize_components(
-        baseline, train, val, run, reflection_model=optimizer_model,
+    evolved_partial = optimize_components(
+        baseline, train, val, run_full_catalog, reflection_model=optimizer_model,
         max_metric_calls=iterations * (len(val) + 3) + len(val),
     )
+    evolved = {**catalog_baseline, **evolved_partial}
     elapsed = time.time() - start
 
     # ── Gates ────────────────────────────────────────────────────────────
     validator = ConstraintValidator(config)
-    changed = {n for n in evolved if evolved[n] != baseline[n]}
+    changed = {n for n in baseline if evolved[n] != baseline[n]}
     constraint_ok = True
     for n in sorted(changed):
         for c in validator.validate_all(evolved[n], "tool_description", baseline_text=baseline[n]):
@@ -94,8 +100,8 @@ def evolve_tool_descriptions(
                 constraint_ok = False
                 console.print(f"  [red]✗ {n}: {c.constraint_name}: {c.message}[/red]")
 
-    base_roll = evaluate_candidate(run, baseline, holdout)
-    evo_roll = evaluate_candidate(run, evolved, holdout)
+    base_roll = evaluate_candidate(run_full_catalog, baseline, holdout)
+    evo_roll = evaluate_candidate(run_full_catalog, evolved_partial, holdout)
     base_acc = per_tool_accuracy(holdout, base_roll)
     evo_acc = per_tool_accuracy(holdout, evo_roll)
     overall_b = mean([float(r.output == t.tool) for t, r in zip(holdout, base_roll)])
@@ -122,7 +128,7 @@ def evolve_tool_descriptions(
         "optimizer_model": optimizer_model, "eval_model": eval_model,
     }
 
-    changes = literal_changes(repo, found, evolved)
+    changes = literal_changes(repo, found, evolved_partial)
 
     write_review_bundle(
         out_dir, "Evolve tool descriptions",

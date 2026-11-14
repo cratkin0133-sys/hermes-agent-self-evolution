@@ -23,6 +23,7 @@ from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset,
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import skill_fitness_metric, skill_gepa_metric, LLMJudge, FitnessScore
 from evolution.core.constraints import ConstraintValidator
+from evolution.core.pr_builder import create_branch
 from evolution.skills.skill_module import (
     SkillModule,
     load_skill,
@@ -43,6 +44,7 @@ def evolve(
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
+    create_pr_branch: bool = False,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
 
@@ -280,16 +282,25 @@ def evolve(
         "phase": "skill",
         "accepted": all_pass and improvement > 0,
     }
+    accepted = metrics["accepted"]
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
     console.print(f"\n  Output saved to {output_dir}/")
-
     if improvement > 0:
         console.print(f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]")
         console.print(f"  Review the diff: diff {output_dir}/baseline_skill.md {output_dir}/evolved_skill.md")
     else:
         console.print(f"\n[yellow]⚠ Evolution did not improve skill (change: {improvement:+.3f})[/yellow]")
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
+
+    if accepted and create_pr_branch:
+        rel = skill_path.relative_to(config.hermes_agent_path).as_posix()
+        branch = f"evolve/skill-{skill_name}-{datetime.now():%Y%m%d-%H%M%S}"
+        wt = create_branch(
+            config.hermes_agent_path, branch, {rel: evolved_full},
+            f"Evolve skill {skill_name} via GEPA", output_dir / "worktree",
+        )
+        console.print(f"  Branch {branch} committed in {wt}" if wt else "  [yellow]hermes repo is not git; no branch[/yellow]")
 
     metrics["output_dir"] = str(output_dir)
     return metrics
@@ -306,7 +317,8 @@ def evolve(
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+@click.option("--create-branch", "create_pr_branch", is_flag=True, help="Commit accepted result on a branch in a hermes-agent worktree")
+def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run, create_pr_branch):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
@@ -318,6 +330,7 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
         hermes_repo=hermes_repo,
         run_tests=run_tests,
         dry_run=dry_run,
+        create_pr_branch=create_pr_branch,
     )
 
 

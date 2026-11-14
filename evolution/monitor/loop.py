@@ -46,7 +46,8 @@ def dispatch(phase: str, target: str, repo: Path, dry_run: bool, create_branch: 
         if phase == "skill":
             from evolution.skills.evolve_skill import evolve
             m = evolve(skill_name=target, iterations=iterations, eval_source="synthetic",
-                       optimizer_model=optimizer_model, eval_model=eval_model, hermes_repo=str(repo), dry_run=dry_run)
+                       optimizer_model=optimizer_model, eval_model=eval_model, hermes_repo=str(repo),
+                       create_pr_branch=create_branch, dry_run=dry_run)
         elif phase == "tool":
             from evolution.tools.evolve_tool_descriptions import evolve_tool_descriptions
             m = evolve_tool_descriptions(tools=[target], iterations=iterations, optimizer_model=optimizer_model,
