@@ -2,6 +2,8 @@
 
 import json
 import re
+import shlex
+import sys
 
 import pytest
 
@@ -62,13 +64,13 @@ def _route(reflector):
     return lambda model, **kw: fake_lm(reflector if "reflect" in model else judge if "judge" in model else agent, model)
 
 
-def _run(repo, tmp_path, monkeypatch, reflector):
+def _run(repo, tmp_path, monkeypatch, reflector, **kw):
     monkeypatch.setattr(eps, "make_lm", _route(reflector))
     monkeypatch.setattr(mc, "make_lm", _route(reflector))
     return eps.evolve_prompt_sections(
         sections=["SESSION_SEARCH_GUIDANCE"], iterations=3, dataset_path=str(repo / "golden.jsonl"),
         optimizer_model="openai/fake-reflect", eval_model="openai/fake-agent", judge_model="openai/fake-judge",
-        hermes_repo=str(repo), output_root=tmp_path / "out",
+        hermes_repo=str(repo), output_root=tmp_path / "out", **kw,
     )
 
 
@@ -89,9 +91,62 @@ def test_phase3_rejects_gutted_section_even_if_score_rises(repo, tmp_path, monke
     assert any("shrink_limit" in f or "growth_limit" in f for f in m["constraint_failures"]), m
 
 
+def _bench_cmd(evolved_score, base_score):
+    code = ("import pathlib; t=pathlib.Path('agent/prompt_builder.py').read_text(); "
+            f"print('SCORE={evolved_score}' if 'search first' in t else 'SCORE={base_score}')")
+    return shlex.join([sys.executable, "-c", code])
+
+
+def test_phase3_benchmark_score_drop_rejects(repo, tmp_path, monkeypatch):
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=_bench_cmd(0.5, 0.9))
+    assert not m["accepted"]
+    assert "benchmark gate failed" in m["rejection_reasons"]
+    assert m["benchmark"]["passed"] is False
+    assert (m["benchmark"]["baseline_score"], m["benchmark"]["evolved_score"]) == (0.9, 0.5)
+
+
+def test_phase3_benchmark_equal_scores_accepts(repo, tmp_path, monkeypatch):
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=_bench_cmd(0.7, 0.7))
+    assert m["accepted"], m
+    assert m["benchmark"]["passed"] is True and m["benchmark"]["evolved_score"] == 0.7
+
+
+def test_phase3_benchmark_regression_tolerance_is_configurable(repo, tmp_path, monkeypatch):
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=_bench_cmd(0.69, 0.7),
+             benchmark_max_regression=0.05)
+    assert m["accepted"], m
+
+
 def test_discovery_and_platform_assembly(repo):
     found, skipped = discover_sections(repo)
     assert "MEMORY_GUIDANCE" in skipped and "PLATFORM_HINTS[cli]" in found
     cand = {k: v.value for k, v in found.items()}
     sp = assemble_system_prompt(cand, "PLATFORM_HINTS[cli]")
     assert "no markdown" in sp and "Telegram" not in sp
+
+
+def test_phase3_benchmark_not_run_when_cheaper_gates_reject(repo, tmp_path, monkeypatch):
+    marker = tmp_path / "bench_ran"
+    cmd = shlex.join([sys.executable, "-c", f"import pathlib; pathlib.Path({str(marker)!r}).write_text('x'); print('SCORE=1')"])
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=cmd, min_improvement=5.0)
+    assert not m["accepted"]
+    assert any(r.startswith("improvement") for r in m["rejection_reasons"])
+    assert not marker.exists()
+    assert m["benchmark"] is None
+
+
+def test_phase3_benchmark_timeout_rejects(repo, tmp_path, monkeypatch):
+    cmd = shlex.join([sys.executable, "-c", "import time; time.sleep(30)"])
+    m = _run(repo, tmp_path, monkeypatch, reflector_good, benchmark_cmd=cmd, benchmark_timeout=1)
+    assert not m["accepted"]
+    assert "benchmark gate failed" in m["rejection_reasons"]
+    assert m["benchmark"]["message"].startswith("inconclusive:")
+
+
+def test_phase3_cli_accepts_benchmark_timeout(monkeypatch):
+    from click.testing import CliRunner
+    seen = {}
+    monkeypatch.setattr(eps, "evolve_prompt_sections", lambda **kw: seen.update(kw))
+    res = CliRunner().invoke(eps.main, ["--benchmark-cmd", "x", "--benchmark-timeout", "7"])
+    assert res.exit_code == 0, res.output
+    assert seen["benchmark_timeout"] == 7

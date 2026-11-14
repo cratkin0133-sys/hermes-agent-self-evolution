@@ -4,6 +4,8 @@ Uses LLM-as-judge with rubrics to score agent outputs.
 Supports length penalties and multi-dimensional scoring.
 """
 
+import threading
+
 import dspy
 from dataclasses import dataclass
 from typing import Optional
@@ -57,8 +59,9 @@ class LLMJudge:
         conciseness: float = dspy.OutputField(desc="Score 0.0-1.0: Appropriately concise?")
         feedback: str = dspy.OutputField(desc="Specific, actionable feedback on what could be improved")
 
-    def __init__(self, config: EvolutionConfig):
+    def __init__(self, config: EvolutionConfig, lm: Optional[dspy.LM] = None):
         self.config = config
+        self.lm = lm
         self.judge = dspy.ChainOfThought(self.JudgeSignature)
 
     def score(
@@ -72,7 +75,7 @@ class LLMJudge:
     ) -> FitnessScore:
         """Score an agent output using LLM-as-judge."""
 
-        lm = dspy.LM(self.config.eval_model)
+        lm = self.lm if self.lm is not None else dspy.LM(self.config.eval_model)
 
         with dspy.context(lm=lm):
             result = self.judge(
@@ -158,6 +161,82 @@ def skill_gepa_metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -
     else:
         feedback = f"Score {score:.2f}. The response covered the expected behavior: {expected!r}."
     return dspy.Prediction(score=score, feedback=feedback)
+
+
+def make_judge_metric(judge: LLMJudge, max_size: Optional[int] = None):
+    """GEPA-compatible metric backed by LLMJudge.
+
+    Returns metric(gold, pred, trace=None, pred_name=None, pred_trace=None)
+    -> dspy.Prediction(score=float, feedback=str).
+
+    The first judge call is serialized (concurrent callers wait for it) and
+    retried once. If it still raises, that is treated as a configuration
+    error: it raises RuntimeError, keeps raising on every later call, and stores
+    the error on ``metric.config_error`` (optimizers such as GEPA swallow metric
+    exceptions, so callers should check it). A judge failure after a successful
+    first call falls back to the keyword heuristic and increments
+    ``metric.fallbacks``.
+    """
+    lock = threading.Lock()
+    state = {"judge_calls": 0, "first_completed": False}
+
+    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -> dspy.Prediction:
+        agent_output = getattr(pred, "output", "") or ""
+        if not agent_output.strip():
+            return dspy.Prediction(
+                score=0.0,
+                feedback="The response was empty. The skill must lead to a concrete answer.",
+            )
+        if metric.config_error is not None:
+            raise metric.config_error
+        skill_text = getattr(pred, "skill_text", "") or ""
+        score_kwargs = dict(
+            task_input=gold.task_input,
+            expected_behavior=gold.expected_behavior,
+            agent_output=agent_output,
+            skill_text=skill_text,
+            artifact_size=len(skill_text) if max_size else None,
+            max_size=max_size,
+        )
+        with lock:
+            if metric.config_error is not None:
+                raise metric.config_error
+            if not state["first_completed"]:
+                # One retry absorbs a transient blip (rate limit, dropped
+                # connection) so it is not mistaken for a configuration error.
+                try:
+                    try:
+                        fitness = judge.score(**score_kwargs)
+                    except Exception:
+                        fitness = judge.score(**score_kwargs)
+                except Exception as e:
+                    err = RuntimeError(
+                        f"LLM judge failed on first call: {type(e).__name__}: {e} "
+                        "\u2014 check --judge-model and its API key"
+                    )
+                    metric.config_error = err
+                    state["first_completed"] = True
+                    state["judge_calls"] += 1
+                    raise err from e
+                state["first_completed"] = True
+                state["judge_calls"] += 1
+                return dspy.Prediction(score=fitness.composite, feedback=fitness.feedback)
+            state["judge_calls"] += 1
+        try:
+            fitness = judge.score(**score_kwargs)
+        except Exception as e:
+            with lock:
+                metric.fallbacks += 1
+            fallback = skill_gepa_metric(gold, pred)
+            return dspy.Prediction(
+                score=fallback.score,
+                feedback=f"[judge unavailable: {type(e).__name__}] {fallback.feedback}",
+            )
+        return dspy.Prediction(score=fitness.composite, feedback=fitness.feedback)
+
+    metric.fallbacks = 0
+    metric.config_error = None
+    return metric
 
 
 def _parse_score(value) -> float:

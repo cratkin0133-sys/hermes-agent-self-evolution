@@ -21,8 +21,9 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric, skill_gepa_metric, LLMJudge, FitnessScore
+from evolution.core.fitness import skill_fitness_metric, skill_gepa_metric, make_judge_metric, LLMJudge, FitnessScore
 from evolution.core.constraints import ConstraintValidator
+from evolution.core.pr_builder import create_branch
 from evolution.skills.skill_module import (
     SkillModule,
     load_skill,
@@ -43,8 +44,14 @@ def evolve(
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
+    create_pr_branch: bool = False,
+    metric: str = "judge",
+    judge_model: Optional[str] = None,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
+
+    if metric not in ("judge", "heuristic"):
+        raise ValueError(f"Unknown metric {metric!r}; expected 'judge' or 'heuristic'")
 
     config = EvolutionConfig(
         hermes_agent_path=resolve_hermes_agent_path(hermes_repo),
@@ -144,6 +151,14 @@ def evolve(
     # Create the baseline skill module
     baseline_module = SkillModule(skill["body"])
 
+    if metric == "judge":
+        judge = LLMJudge(config, lm=dspy.LM(judge_model or optimizer_model))
+        gepa_metric = make_judge_metric(judge, max_size=config.max_skill_size)
+        console.print(f"  Metric: LLM judge ({judge_model or optimizer_model})")
+    else:
+        gepa_metric = skill_gepa_metric
+        console.print("  Metric: keyword heuristic")
+
     # Prepare DSPy examples
     trainset = dataset.to_dspy_examples("train")
     valset = dataset.to_dspy_examples("val")
@@ -157,7 +172,7 @@ def evolve(
         # DSPy >= 3.0: GEPA needs a reflection LM (strong model) and a budget.
         reflection_lm = dspy.LM(optimizer_model, temperature=1.0, max_tokens=16000)
         optimizer = dspy.GEPA(
-            metric=skill_gepa_metric,
+            metric=gepa_metric,
             reflection_lm=reflection_lm,
             max_full_evals=iterations,
             track_stats=True,
@@ -169,11 +184,26 @@ def evolve(
         )
     else:
         console.print("[yellow]dspy.GEPA not available in this DSPy version, falling back to MIPROv2[/yellow]")
-        optimizer = dspy.MIPROv2(metric=skill_fitness_metric, auto="light")
+        optimizer = dspy.MIPROv2(metric=skill_fitness_metric if metric == "heuristic" else (lambda ex, pred, trace=None: gepa_metric(ex, pred).score), auto="light")
         optimized_module = optimizer.compile(baseline_module, trainset=trainset)
 
     elapsed = time.time() - start_time
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
+
+    # GEPA turns metric exceptions into failure scores, so surface a broken judge here.
+    if getattr(gepa_metric, "config_error", None) is not None:
+        raise gepa_metric.config_error
+    warned = {"fallback": False}
+
+    def warn_on_fallbacks() -> int:
+        n = getattr(gepa_metric, "fallbacks", 0)
+        if n and not warned["fallback"]:
+            warned["fallback"] = True
+            console.print(f"[yellow]⚠ LLM judge failed {n} time(s); those examples were scored by the "
+                          "keyword heuristic[/yellow]")
+        return n
+
+    fallbacks_before_holdout = warn_on_fallbacks()
 
     # ── 6. Extract evolved skill text ───────────────────────────────────
     # The optimized module's instructions contain the evolved skill text
@@ -193,8 +223,8 @@ def evolve(
 
     if not all_pass:
         console.print("[red]✗ Evolved skill FAILED constraints — not deploying[/red]")
-        # Still save for inspection
-        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        # Still save for inspection (timestamped so concurrent runs do not overwrite)
+        stamp = datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
         output_path = config.output_dir / skill_name / f"evolved_FAILED_{stamp}.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(evolved_full)
@@ -207,18 +237,26 @@ def evolve(
 
     holdout_examples = dataset.to_dspy_examples("holdout")
 
+    def holdout_score(ex, pred) -> float:
+        if metric == "judge":
+            return gepa_metric(ex, pred).score
+        return skill_fitness_metric(ex, pred)
+
     baseline_scores = []
     evolved_scores = []
     for ex in holdout_examples:
         # Score baseline
         with dspy.context(lm=lm):
             baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
+            baseline_score = holdout_score(ex, baseline_pred)
             baseline_scores.append(baseline_score)
 
             evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_score = skill_fitness_metric(ex, evolved_pred)
+            evolved_score = holdout_score(ex, evolved_pred)
             evolved_scores.append(evolved_score)
+
+    judge_fallbacks = warn_on_fallbacks()
+    holdout_fallbacks = judge_fallbacks - fallbacks_before_holdout
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
@@ -261,6 +299,14 @@ def evolve(
     # Save baseline for comparison
     (output_dir / "baseline_skill.md").write_text(skill["raw"])
 
+    reasons = []
+    if evolved_full == skill["raw"]:
+        reasons.append("skill unchanged")
+    if improvement <= 0:
+        reasons.append("no holdout improvement")
+    if holdout_fallbacks:
+        reasons.append("judge fallback during holdout scoring")
+
     # Save metrics
     metrics = {
         "skill_name": skill_name,
@@ -268,6 +314,9 @@ def evolve(
         "iterations": iterations,
         "optimizer_model": optimizer_model,
         "eval_model": eval_model,
+        "metric": metric,
+        "judge_model": (judge_model or optimizer_model) if metric == "judge" else None,
+        "judge_fallbacks": judge_fallbacks,
         "baseline_score": avg_baseline,
         "evolved_score": avg_evolved,
         "improvement": improvement,
@@ -279,18 +328,31 @@ def evolve(
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
         "phase": "skill",
-        "accepted": all_pass and improvement > 0,
+        "accepted": all_pass and not reasons,
+        "rejection_reasons": reasons,
     }
+    accepted = metrics["accepted"]
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
     console.print(f"\n  Output saved to {output_dir}/")
-
+    if holdout_fallbacks:
+        console.print(f"\n[yellow]⚠ Not accepted: judge fallback during holdout scoring "
+                      f"({holdout_fallbacks} example(s))[/yellow]")
     if improvement > 0:
         console.print(f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]")
         console.print(f"  Review the diff: diff {output_dir}/baseline_skill.md {output_dir}/evolved_skill.md")
     else:
         console.print(f"\n[yellow]⚠ Evolution did not improve skill (change: {improvement:+.3f})[/yellow]")
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
+
+    if accepted and create_pr_branch:
+        rel = skill_path.relative_to(config.hermes_agent_path).as_posix()
+        branch = f"evolve/skill-{skill_name}-{datetime.now():%Y%m%d-%H%M%S}"
+        wt = create_branch(
+            config.hermes_agent_path, branch, {rel: evolved_full},
+            f"Evolve skill {skill_name} via GEPA", output_dir / "worktree",
+        )
+        console.print(f"  Branch {branch} committed in {wt}" if wt else "  [yellow]hermes repo is not git; no branch[/yellow]")
 
     metrics["output_dir"] = str(output_dir)
     return metrics
@@ -307,7 +369,12 @@ def evolve(
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+@click.option("--create-branch", "create_pr_branch", is_flag=True, help="Commit accepted result on a branch in a hermes-agent worktree")
+@click.option("--metric", default="judge", type=click.Choice(["judge", "heuristic"]),
+              help="Scoring metric: LLM judge (default) or keyword heuristic")
+@click.option("--judge-model", default=None, help="Model for the LLM judge (default: optimizer model)")
+def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run,
+         create_pr_branch, metric, judge_model):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
@@ -319,6 +386,9 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
         hermes_repo=hermes_repo,
         run_tests=run_tests,
         dry_run=dry_run,
+        create_pr_branch=create_pr_branch,
+        metric=metric,
+        judge_model=judge_model,
     )
 
 
