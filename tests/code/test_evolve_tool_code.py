@@ -112,3 +112,56 @@ def test_find_tool_file_handles_multiline_register(tmp_path):
     (tmp_path / "tools" / "t.py").write_text('registry.register(\n    name="terminal",\n    handler=h,\n)\n')
     assert etc.find_tool_file(tmp_path, "terminal") == tmp_path / "tools" / "t.py"
     assert etc.find_tool_file(tmp_path, "nope") is None
+
+
+def test_phase4_bug_issue_fetches_text_and_links_issue(repo, tmp_path, monkeypatch):
+    from evolution.code.github_issues import Issue
+    seen = {}
+
+    def fake_fetch(r, n, **kw):
+        seen["args"] = (r, n)
+        return Issue(r, n, "safe_div blows up", "ZeroDivisionError on b=0", "https://github.com/o/r/issues/12", ["me too"])
+
+    replies = iter([GOOD])
+    prompts = []
+    monkeypatch.setattr(etc, "fetch_issue", fake_fetch)
+    monkeypatch.setattr(etc, "make_lm", lambda model, **kw: fake_lm(lambda s, u: (prompts.append(u), next(replies))[1]))
+    repro = f'{sys.executable} -c "from tools.calc_tools import safe_div; assert safe_div(1, 0) is None"'
+    m = etc.evolve_tool_code(
+        repro=repro, bug=None, bug_issue=12, issue_repo="o/r", tool="safe_div",
+        test_cmd=f"{sys.executable} -m pytest tests -q -p no:cacheprovider",
+        iterations=2, hermes_repo=str(repo), output_root=tmp_path / "out",
+    )
+    assert seen["args"] == ("o/r", 12)
+    assert m["accepted"], m
+    assert m["issue_url"] == "https://github.com/o/r/issues/12"
+    body = next((tmp_path / "out").glob("code/*/PR_BODY.md")).read_text()
+    assert "Fixes https://github.com/o/r/issues/12" in body
+    assert "Fix #12: safe_div blows up" in body
+    assert any("ZeroDivisionError on b=0" in p for p in prompts)
+
+
+def test_phase4_bug_and_bug_issue_validation(repo, tmp_path):
+    with pytest.raises(ValueError):
+        etc.evolve_tool_code(repro="true", bug="x", bug_issue=1, tool="safe_div", hermes_repo=str(repo),
+                             output_root=tmp_path)
+    with pytest.raises(ValueError):
+        etc.evolve_tool_code(repro="true", tool="safe_div", hermes_repo=str(repo), output_root=tmp_path)
+
+
+def test_phase4_fetch_failure_exits_1(repo, tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("GitHub returned 404")
+    monkeypatch.setattr(etc, "fetch_issue", boom)
+    with pytest.raises(SystemExit) as e:
+        etc.evolve_tool_code(repro="true", bug_issue=3, tool="safe_div", hermes_repo=str(repo), output_root=tmp_path)
+    assert e.value.code == 1
+
+
+def test_cli_requires_exactly_one_of_bug_and_bug_issue():
+    from click.testing import CliRunner
+    r = CliRunner()
+    neither = r.invoke(etc.main, ["--tool", "t", "--repro", "true"])
+    both = r.invoke(etc.main, ["--tool", "t", "--repro", "true", "--bug", "x", "--bug-issue", "3"])
+    for res in (neither, both):
+        assert res.exit_code != 0 and "--bug" in res.output
