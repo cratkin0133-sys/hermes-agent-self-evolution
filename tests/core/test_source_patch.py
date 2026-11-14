@@ -57,3 +57,16 @@ def test_replace_round_trips_and_preserves_rest(src):
     assert ns["READ_SCHEMA"]["description"] == "Read a text file with line numbers."
     assert ns["READ_SCHEMA"]["parameters"]["properties"]["path"]["description"] == "Path"
     assert 'BUILT = build("x")' in new
+
+
+def test_multiline_rewrite_keeps_comments_and_parens(tmp_path):
+    p = tmp_path / "m.py"
+    p.write_text('X = (\n    "alpha "\n    # keep me\n    "beta"\n)\n')
+    lit = find_string_constants(p, ["X"])[0]["X"]
+    new = replace_literals(p.read_text(), {lit: "alpha beta " + "gamma " * 30})
+    assert "# keep me" in new
+    assert "((" not in new and new.count("(") == 1
+    assert max(len(l) for l in new.splitlines()) <= 100
+    ns = {}
+    exec(new, ns)
+    assert ns["X"] == "alpha beta " + "gamma " * 30

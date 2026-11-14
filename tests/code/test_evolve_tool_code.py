@@ -105,3 +105,10 @@ def test_apply_blocks_requires_unique_exact_match():
     assert "if b == 0" in apply_blocks(TOOL, m.blocks)
     with pytest.raises(ValueError):
         apply_blocks(TOOL, [("not in file", "x")])
+
+
+def test_find_tool_file_handles_multiline_register(tmp_path):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "t.py").write_text('registry.register(\n    name="terminal",\n    handler=h,\n)\n')
+    assert etc.find_tool_file(tmp_path, "terminal") == tmp_path / "tools" / "t.py"
+    assert etc.find_tool_file(tmp_path, "nope") is None
