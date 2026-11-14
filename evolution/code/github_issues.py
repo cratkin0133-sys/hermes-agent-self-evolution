@@ -1,4 +1,9 @@
-"""Fetch a GitHub issue (title, body, first comments) to use as a Phase 4 bug description."""
+"""Fetch a GitHub issue (title, body, first comments) to use as a Phase 4 bug description.
+
+Issue text is untrusted input that steers LLM-written code. By default only
+comments from the repo's OWNER, MEMBERs and COLLABORATORs are kept; pass
+``all_comments=True`` to include everyone's.
+"""
 
 import json
 import os
@@ -8,6 +13,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 API = "https://api.github.com"
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
 @dataclass
@@ -36,7 +42,7 @@ def _get_json(url: str, headers: dict, timeout: int, opener):
 
 
 def fetch_issue(repo: str, number: int, token: Optional[str] = None,
-                max_comments: int = 10, timeout: int = 20, opener=None) -> Issue:
+                max_comments: int = 10, timeout: int = 20, opener=None, all_comments: bool = False) -> Issue:
     token = token if token is not None else os.environ.get("GITHUB_TOKEN")
     opener = opener or urllib.request.urlopen
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "hermes-agent-self-evolution"}
@@ -49,7 +55,8 @@ def fetch_issue(repo: str, number: int, token: Optional[str] = None,
     comments: list[str] = []
     if data.get("comments"):
         raw = _get_json(f"{base}/comments?per_page={max_comments}", headers, timeout, opener)
-        comments = [c["body"] for c in raw if c.get("body")]
+        comments = [c["body"] for c in raw if c.get("body")
+                    and (all_comments or c.get("author_association") in TRUSTED_ASSOCIATIONS)]
     return Issue(repo=repo, number=number, title=data.get("title") or "", body=data.get("body") or "",
                  url=data.get("html_url") or "", comments=comments)
 
