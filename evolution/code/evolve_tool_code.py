@@ -15,9 +15,19 @@ Usage:
         --repro "python -m pytest tests/tools/test_read_file_bug.py -q" \\
         --bug "read_file crashes on empty files" \\
         --test-cmd "python -m pytest tests/tools -q -x"
+
+    # or take the bug text from a GitHub issue (GITHUB_TOKEN for private repos):
+    python -m evolution.code.evolve_tool_code --tool read_file \\
+        --repro "python -m pytest tests/tools/test_read_file_bug.py -q" \\
+        --bug-issue 123 --issue-repo NousResearch/hermes-agent
+
+Issue text is untrusted: only maintainer comments are used unless --all-comments,
+the mutator prompt marks it as data rather than instructions, and repro/test
+commands run without GITHUB_TOKEN, GH_TOKEN or ``*_API_KEY`` variables.
 """
 
 import math
+import os
 import random
 import shlex
 import shutil
@@ -31,6 +41,7 @@ from typing import Optional
 
 import click
 from rich.console import Console
+from rich.markup import escape
 
 from evolution.code.code_guards import check_guards
 from evolution.code.github_issues import Issue, fetch_issue, issue_to_bug_text
@@ -79,6 +90,20 @@ def find_tool_file(repo: Path, tool: str) -> Optional[Path]:
     return None
 
 
+SECRET_ENV_NAMES = frozenset({"GITHUB_TOKEN", "GH_TOKEN"})
+
+
+def scrubbed_env() -> dict[str, str]:
+    """os.environ without GitHub tokens or ``*_API_KEY`` variables, for running candidate code."""
+    return {k: v for k, v in os.environ.items() if k not in SECRET_ENV_NAMES and not k.endswith("_API_KEY")}
+
+
+def bug_preview(bug: str, limit: int = 200) -> str:
+    """First line of the bug text, at most ``limit`` chars, safe to print through rich."""
+    first = (bug.strip().splitlines() or [""])[0]
+    return escape(first[:limit] + ("…" if len(first) > limit else ""))
+
+
 class Workspace:
     """A detached git worktree (or copy) where candidate files are evaluated."""
 
@@ -96,7 +121,9 @@ class Workspace:
 
     def run(self, command: str, timeout: int) -> tuple[bool, str]:
         try:
-            p = subprocess.run(shlex.split(command), cwd=self.tree, capture_output=True, text=True, timeout=timeout)
+            # Candidate code is LLM-written from untrusted issue text: keep tokens/API keys away from it.
+            p = subprocess.run(shlex.split(command), cwd=self.tree, capture_output=True, text=True, timeout=timeout,
+                               env=scrubbed_env())
         except subprocess.TimeoutExpired:
             return False, f"TIMEOUT after {timeout}s"
         return p.returncode == 0, (p.stdout + p.stderr)[-3000:]
@@ -144,6 +171,7 @@ def evolve_tool_code(
     seed: int = 0,
     bug_issue: Optional[int] = None,
     issue_repo: str = "NousResearch/hermes-agent",
+    all_comments: bool = False,
 ) -> dict:
     if bug and bug_issue is not None:
         raise ValueError("Pass either bug or bug_issue, not both")
@@ -152,9 +180,9 @@ def evolve_tool_code(
     issue: Optional[Issue] = None
     if bug_issue is not None:
         try:
-            issue = fetch_issue(issue_repo, bug_issue)
+            issue = fetch_issue(issue_repo, bug_issue, all_comments=all_comments)
         except (RuntimeError, ValueError) as e:
-            console.print(f"[red]✗ Could not fetch {issue_repo}#{bug_issue}: {e}[/red]")
+            console.print(f"[red]✗ Could not fetch {escape(issue_repo)}#{bug_issue}: {escape(str(e))}[/red]")
             sys.exit(1)
         bug = issue_to_bug_text(issue)
     repo = resolve_hermes_agent_path(hermes_repo)
@@ -164,7 +192,7 @@ def evolve_tool_code(
         sys.exit(1)
     rel = str(target.relative_to(repo))
     baseline = target.read_text()
-    console.print(f"\n[bold cyan]🧬 Phase 4[/bold cyan] — Evolving {rel}\n  Bug: {bug}")
+    console.print(f"\n[bold cyan]🧬 Phase 4[/bold cyan] — Evolving {escape(rel)}\n  Bug: {bug_preview(bug)}")
 
     lm = make_lm(model, temperature=0.8, max_tokens=16000)
     rng = random.Random(seed)
@@ -187,7 +215,7 @@ def evolve_tool_code(
                 child = Organism(apply_blocks(parent.source, mut.blocks), diagnosis=mut.diagnosis, parent=pi)
             except Exception as e:
                 history.append(f"iteration {it}: mutation unusable ({e!r})")
-                console.print(f"  [{it}] mutation unusable: {e!r}")
+                console.print(f"  [{it}] mutation unusable: {escape(repr(e))}")
                 continue
             evaluate(ws, rel, baseline, child, repro, test_cmd, timeout)
             evaluated += 1
@@ -196,7 +224,7 @@ def evolve_tool_code(
             outcome = ("guards: " + "; ".join(child.guard_problems)) if child.guard_problems else \
                 f"repro {'PASS' if child.repro_ok else 'FAIL'}, tests {'PASS' if child.tests_ok else 'FAIL'}"
             history.append(f"iteration {it} (from #{pi}): {mut.diagnosis[:160]!r} → {outcome}")
-            console.print(f"  [{it}] parent #{pi} → score {child.score:.2f} ({outcome})")
+            console.print(f"  [{it}] parent #{pi} → score {child.score:.2f} ({escape(outcome)})")
             if child.solved:
                 break
     finally:
@@ -243,19 +271,24 @@ def evolve_tool_code(
 @click.option("--bug", default=None, help="Bug description (e.g. the GitHub issue text)")
 @click.option("--bug-issue", type=int, default=None, help="Or a GitHub issue number to fetch the bug text from")
 @click.option("--issue-repo", default="NousResearch/hermes-agent", help="owner/name repo for --bug-issue")
+@click.option("--all-comments", is_flag=True,
+              help="With --bug-issue, include comments from anyone (default: only owner/members/collaborators)")
 @click.option("--test-cmd", default="python -m pytest tests/ -q -x", help="Regression suite; must pass")
 @click.option("--iterations", default=10)
 @click.option("--model", default="openai/gpt-4.1", help="Mutator model")
 @click.option("--timeout", default=1800, help="Per-command timeout (s)")
 @click.option("--hermes-repo", default=None)
 @click.option("--create-branch", "create_pr_branch", is_flag=True)
-def main(tool, file, repro, bug, bug_issue, issue_repo, test_cmd, iterations, model, timeout, hermes_repo, create_pr_branch):
+def main(tool, file, repro, bug, bug_issue, issue_repo, all_comments, test_cmd, iterations, model, timeout, hermes_repo,
+         create_pr_branch):
     """Evolve a tool's code until a bug reproduction passes without breaking tests."""
     if not (tool or file):
         raise click.UsageError("Pass --tool or --file")
+    bug = bug if bug and bug.strip() else None  # an empty --bug counts as missing
     if (bug is None) == (bug_issue is None):
-        raise click.UsageError("Pass exactly one of --bug or --bug-issue")
-    evolve_tool_code(repro=repro, bug=bug, bug_issue=bug_issue, issue_repo=issue_repo, tool=tool, file=file, test_cmd=test_cmd, iterations=iterations,
+        raise click.UsageError("Pass exactly one of --bug (non-empty) or --bug-issue")
+    evolve_tool_code(repro=repro, bug=bug, bug_issue=bug_issue, issue_repo=issue_repo, all_comments=all_comments,
+                     tool=tool, file=file, test_cmd=test_cmd, iterations=iterations,
                      model=model, hermes_repo=hermes_repo, timeout=timeout, create_pr_branch=create_pr_branch)
 
 
